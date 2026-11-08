@@ -1,0 +1,40 @@
+@startuml
+title qtooth-ble - shell-triggered encrypted message
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontName DejaVu Sans
+skinparam shadowing false
+skinparam ArrowColor #475569
+skinparam participantBorderColor #64748B
+skinparam participantBackgroundColor #E7F0FA
+skinparam noteBorderColor #94A3B8
+skinparam noteBackgroundColor #F8FAFC
+hide footbox
+actor "Shell user" as user
+participant "Pi: qtooth-ble\nRust / BlueR / OpenSSL" as pi
+participant "Pixel app\nKotlin BLE + Rust core" as phone
+user -> pi : send plaintext
+pi -> phone : Advertise custom service
+phone -> pi : Connect / discover / subscribe
+note over pi, phone
+Unique provisioned pairing PSK; fresh nonces.
+Writes with response toward Pi; indications toward phone.
+end note
+pi -> pi : Generate ephemeral ML-KEM-768 key pair
+loop Bounded application fragments
+  pi -> phone : KEM public-key chunks
+end
+phone -> phone : Encapsulate shared secret
+loop Bounded application fragments
+  phone -> pi : KEM ciphertext chunks
+end
+pi -> pi : Decapsulate shared secret
+pi <-> phone : Authenticate bound transcript / confirm derived keys
+note over pi, phone
+HKDF produces session keys/nonce material.
+Abort on authentication or reassembly failure.
+end note
+pi -> phone : AEAD ciphertext + authenticated metadata
+phone -> phone : Check sequence/tag; display plaintext
+phone -> pi : Authenticated receipt
+pi -> user : Result / MTU / fragments / timings
+@enduml

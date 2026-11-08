@@ -1,0 +1,48 @@
+@startuml
+title qtooth-hwe2dr - FPGA action, kernel notification
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontName DejaVu Sans
+skinparam shadowing false
+skinparam ArrowColor #475569
+skinparam activityBorderColor #64748B
+skinparam activityBackgroundColor #E7F0FA
+skinparam activityDiamondBorderColor #64748B
+skinparam activityDiamondBackgroundColor #F1F5F9
+skinparam noteBorderColor #94A3B8
+skinparam noteBackgroundColor #F8FAFC
+start
+partition "Rust CLI" {
+  :Configure FPGA policy and arm\nthrough kernel device ABI / SPI;
+}
+partition "FPGA fabric" {
+  :Passive SDA/SCL capture\nand timestamped feature window;
+  :Fixed-point deterministic VAE score;
+  if (Anomaly AND armed / valid model/window /\npersistence / target / cooldown / budget?) then (yes)
+    :Raise DECISION marker;\nlatch qualification timestamp;
+  else (no)
+    :Continue observing;\nno reset or action IRQ;
+    stop
+  endif
+  :Wait for STOP / bus-idle boundary;\nbounded, target-approved abort on timeout;
+  if (Still armed AND hardware guards hold?) then (yes)
+    :Assert RESET_REQ; timestamp assertion;\nhold target-defined pulse;
+    :Release reset; lower DECISION;\ntimestamp release; clear stale windows;
+    :Enter cooldown / settling state;\nenqueue action record; assert IRQ;
+  else (no)
+    :Cancel pending action;\nlower DECISION; no reset or action IRQ;
+    stop
+  endif
+}
+partition "Pi kernel - notification only" {
+  :Threaded IRQ reads / acknowledges\npost-action record over SPI;
+  :Expose event to Rust CLI;\nno reset or I2C recovery callback;
+}
+stop
+note right
+Reset FSM never waits for Linux, SPI acknowledgment
+or space in the notification FIFO.
+Timestamp output commands; scope physical RESET_N.
+Count notification overflow.
+Repeat windows while armed.
+end note
+@enduml

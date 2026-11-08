@@ -1,0 +1,35 @@
+@startuml
+title qtooth-hwe2dr - offline training to FPGA bitstream
+top to bottom direction
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontName DejaVu Sans
+skinparam shadowing false
+skinparam ArrowColor #475569
+skinparam componentBorderColor #64748B
+skinparam componentBackgroundColor #F1F5F9
+skinparam nodeBorderColor #64748B
+skinparam noteBorderColor #94A3B8
+skinparam noteBackgroundColor #F8FAFC
+skinparam componentStyle rectangle
+rectangle "Recorded bus traces\nnormal + held-out fault trials" as traces
+package "Workstation only" {
+  component "Versioned feature schema\nRust reference tooling" as features
+  component "Rust tch / LibTorch\nVAE training + evaluation" as train
+  component "Quantization + deterministic\nlatent-mean reference" as fixed
+  component "RTL inference engine\nweights + normalization" as rtl
+  component "Yosys / nextpnr-ice40 / IceStorm\nfit, timing and parity checks" as synth
+}
+artifact "Bitstream + compatible\nmodel manifest" as bitstream
+node "iCEBreaker\ncapture / VAE / guarded reset FSM" as fpga
+traces --> features
+features --> train
+train --> fixed
+fixed --> rtl
+rtl --> synth
+synth --> bitstream
+bitstream --> fpga : USB programming\nknown-good deployment
+note bottom of synth
+iCE40 resource/timing gate required.
+No assumed hls4ml backend.
+end note
+@enduml

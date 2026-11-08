@@ -1,0 +1,40 @@
+@startuml
+title QuantumTooth - physical reference setup
+top to bottom direction
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontName DejaVu Sans
+skinparam shadowing false
+skinparam ArrowColor #475569
+skinparam nodeBorderColor #64748B
+skinparam nodeBackgroundColor #F1F5F9
+skinparam rectangleBorderColor #64748B
+skinparam rectangleBackgroundColor #F8FAFC
+skinparam noteBorderColor #94A3B8
+skinparam noteBackgroundColor #F8FAFC
+skinparam componentStyle rectangle
+node "Pixel 7a\nAndroid 17" as phone
+node "Raspberry Pi 4 Model B / 4 GB\nIntegrated BLE; I2C1; SPI0; GPIO" as pi
+rectangle "Shared SDA / SCL\n3.3 V open-drain bus" as bus
+node "TMP102 / 0x48\nhealthy target" as healthy
+node "Pico RP2040 / 0x42\nprogrammable target" as faulty
+node "iCEBreaker-compatible UP5K\nReference: iCEBreaker v1.1" as fpga
+rectangle "Open-drain reset stage\nHIGH request -> RUN LOW" as buffer
+pi <--> phone : BLE GATT\nkey exchange / ciphertext
+pi <--> bus : I2C1
+bus <--> healthy
+bus <--> faulty
+bus --> fpga : Input-only SDA / SCL taps
+pi <--> fpga : Separate SPI0 + GPIO25 IRQ
+fpga --> buffer : P1B4 RESET_REQ
+buffer --> faulty : RUN reset
+note bottom of bus
+Common ground; 3.3 V signals.
+Separately regulated supplies.
+Scope SDA / SCL / physical RESET_N.
+end note
+note bottom of fpga
+USB programming from workstation.
+Scope P1B7 DECISION marker.
+P1B3 IRQ reports completed action.
+end note
+@enduml

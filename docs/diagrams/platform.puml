@@ -1,0 +1,42 @@
+@startuml
+title QuantumTooth - common platform, independent features
+top to bottom direction
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontName DejaVu Sans
+skinparam shadowing false
+skinparam ArrowColor #475569
+skinparam componentBorderColor #64748B
+skinparam componentBackgroundColor #F1F5F9
+skinparam nodeBorderColor #64748B
+skinparam noteBorderColor #94A3B8
+skinparam noteBackgroundColor #F8FAFC
+skinparam componentStyle rectangle
+skinparam packageStyle rectangle
+
+node "Build workstation" {
+  component "kas + BitBake\npinned Yocto / BSP / toolchains" as build
+  artifact "meta-qtooth-platform\nmeta-qtooth-ble\nmeta-qtooth-hwe2dr" as layers
+  layers --> build
+}
+
+node "Raspberry Pi 4B" {
+  actor "Shell user" as user
+  package "Userspace" {
+    component "qtooth-ble\nRust / BlueR / OpenSSL" as ble #E7F0FA
+    component "qtooth-hwe2dr\nRust control and events" as hwe #E7F0FA
+    component "BlueZ + D-Bus" as bluez
+  }
+  component "PREEMPT_RT kernel\nBT / I2C / SPI / GPIO events" as kernel #E7F4EA
+  user --> ble : send
+  user --> hwe : arm / monitor / disarm
+  ble --> bluez
+  bluez --> kernel : HCI
+  hwe --> kernel : device ABI
+}
+build --> kernel : bootable image
+note bottom of kernel
+No runtime dependency between features.
+Rust first; Android UI/RTL and narrow FFI
+are explicit exceptions.
+end note
+@enduml
