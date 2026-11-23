@@ -1,0 +1,61 @@
+#!/bin/sh
+## @file
+## @brief Stage the verified bus boot configuration on the current physical Pi.
+## @details Validates payload, board, base DTB and old config before writing.
+## Keeps a FAT-partition rollback copy and leaves reboot to the operator.
+## @param $1 Directory containing the prepared deployment payload.
+## @return Zero after staging; nonzero on an unmet precondition or write error.
+
+set -eu
+qtooth_payload=${1:-/tmp/qtooth-buses}
+qtooth_backup=/boot/config.txt.qtooth-pre-buses
+
+test "$(id -u)" = 0 || { printf 'Run this staging helper as root.\n' >&2; exit 1; }
+test "$(uname -m)" = aarch64
+grep -aq 'raspberrypi,4-model-b' /sys/firmware/devicetree/base/compatible
+grep -q ' /boot vfat ' /proc/mounts
+
+while read -r qtooth_expected qtooth_name; do
+    case "$qtooth_name" in
+        config.txt|qtooth-platform-buses.dtbo|qtooth-platform-buses.conf|old-config.sha256|base-dtb.sha256|apply.sh) ;;
+        *) printf 'Unexpected payload path: %s\n' "$qtooth_name" >&2; exit 1 ;;
+    esac
+    qtooth_actual=$(sha256sum "$qtooth_payload/$qtooth_name" | cut -d ' ' -f 1)
+    test "$qtooth_actual" = "$qtooth_expected" || {
+        printf 'Payload checksum mismatch: %s\n' "$qtooth_name" >&2; exit 1;
+    }
+done < "$qtooth_payload/manifest.sha256"
+
+qtooth_expected_dtb=$(cat "$qtooth_payload/base-dtb.sha256")
+qtooth_actual_dtb=$(sha256sum /boot/bcm2711-rpi-4-b.dtb | cut -d ' ' -f 1)
+test "$qtooth_actual_dtb" = "$qtooth_expected_dtb" || {
+    printf 'Unexpected base DTB; preserve the card and inspect before updating.\n' >&2; exit 1;
+}
+qtooth_old=$(cat "$qtooth_payload/old-config.sha256")
+qtooth_new=$(sha256sum "$qtooth_payload/config.txt" | cut -d ' ' -f 1)
+qtooth_current=$(sha256sum /boot/config.txt | cut -d ' ' -f 1)
+if [ "$qtooth_current" != "$qtooth_old" ] && [ "$qtooth_current" != "$qtooth_new" ]; then
+    printf 'Boot config differs from both reviewed versions; leaving it untouched.\n' >&2
+    printf 'Observed config SHA256: %s\n' "$qtooth_current" >&2
+    exit 1
+fi
+
+if [ -f "$qtooth_backup" ]; then
+    test "$(sha256sum "$qtooth_backup" | cut -d ' ' -f 1)" = "$qtooth_old"
+else
+    test "$qtooth_current" = "$qtooth_old"
+    cp /boot/config.txt "$qtooth_backup"
+fi
+
+mkdir -p /boot/overlays /etc/modules-load.d
+cp "$qtooth_payload/qtooth-platform-buses.dtbo" /boot/overlays/qtooth-platform-buses.dtbo.pending
+mv /boot/overlays/qtooth-platform-buses.dtbo.pending /boot/overlays/qtooth-platform-buses.dtbo
+cp "$qtooth_payload/qtooth-platform-buses.conf" /etc/modules-load.d/qtooth-platform-buses.conf
+cp "$qtooth_payload/config.txt" /boot/config.txt.qtooth-pending
+mv /boot/config.txt.qtooth-pending /boot/config.txt
+sync
+printf 'Bus configuration staged; no running device-tree changes or reboot performed.\n'
+printf 'Rollback boot config: %s\n' "$qtooth_backup"
+printf 'Next boot: I2C1 GPIO2/3 at 100 kHz; SPI0 GPIO9/10/11 with CE0 GPIO8.\n'
+printf 'Stock spidev clients remain disabled; Bluetooth UART policy is preserved.\n'
+sha256sum /boot/config.txt /boot/overlays/qtooth-platform-buses.dtbo /etc/modules-load.d/qtooth-platform-buses.conf

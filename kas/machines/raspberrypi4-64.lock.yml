@@ -1,0 +1,8 @@
+# @file
+# @brief Wrynose BSP lock; kernel and firmware sources are fixed by these recipes.
+header:
+  version: 14
+overrides:
+  repos:
+    meta-raspberrypi:
+      commit: 919588393f41b48cb6c5d832aa35e58a19b6762d

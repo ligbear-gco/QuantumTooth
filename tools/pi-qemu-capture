@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""@file
+@brief Continuously capture a disposable Pi boot and upload a local guest experiment.
+@details Requires Docker access. Commands and results stay in ignored evidence roots.
+"""
+import argparse
+import datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import pty
+import re
+import select
+import shlex
+import subprocess
+import time
+
+
+def main():
+    """@brief Run one attributed trial, preserving raw output even on failure.
+    @return Zero only for successful guest inspection and observed clean shutdown.
+    """
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--profile', choices=('nonrt', 'rt'), required=True)
+    parser.add_argument('--image', choices=('base', 'diagnostic'), default='base')
+    parser.add_argument('--tcg-thread', choices=('single', 'multi'), default='single')
+    parser.add_argument('--script', type=Path, default=Path('tools/pi4-guest-inspect'))
+    parser.add_argument('--condition', choices=('inspect', 'smoke', 'idle', 'load'), default='inspect')
+    options = parser.parse_args()
+    if options.image == 'base' and options.condition != 'inspect':
+        parser.error('smoke/idle/load conditions require --image diagnostic')
+    root = Path(__file__).resolve().parent.parent
+    os.chdir(root)
+    evidence = root / f'build/raspberrypi4-64-{options.profile}-{options.image}/evidence'
+    config_hash = hashlib.sha256((evidence / 'kernel.config').read_bytes()).hexdigest()
+    release = (evidence / 'kernel.release').read_text().strip()
+    script = options.script.read_bytes()
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
+    trial = evidence / f'trial-{options.condition}-{stamp}'
+    trial.mkdir()
+    (trial / 'guest-script.sh').write_bytes(script)
+    (trial / 'host-capture.py').write_bytes(Path(__file__).read_bytes())
+    # POSIX printf needs no optional transfer utility in the minimal base guest.
+    upload = [''.join(f'\\0{byte:03o}' for byte in script[i:i+180])
+              for i in range(0, len(script), 180)]
+    commands = ['stty -echo; : > /run/qtooth-trial.sh']
+    commands += [f"printf '%b' '{chunk}' >> /run/qtooth-trial.sh" for chunk in upload]
+    environment = {'QTOOTH_EXPECTED_CONFIG': config_hash, 'QTOOTH_EXPECTED_RELEASE': release,
+                   'QTOOTH_PROFILE': options.profile, 'QTOOTH_TRIAL_CONDITION': options.condition}
+    commands.append(' '.join(f'{k}={shlex.quote(v)}' for k, v in environment.items()) +
+                    ' /bin/sh /run/qtooth-trial.sh')
+    (trial / 'upload-commands.json').write_text(json.dumps(commands, indent=2)+'\n')
+    args = ['./tools/run-qemu', '--machine', 'raspberrypi4-64', '--profile', options.profile,
+            '--image', options.image, '--tcg-thread', options.tcg_thread]
+    (trial / 'launch-command.json').write_text(json.dumps(args)+'\n')
+    master, slave = pty.openpty()
+    started = time.monotonic()
+    proc = subprocess.Popen(args, stdin=slave, stdout=slave, stderr=slave)
+    os.close(slave)
+    tail = b''
+    session = None
+    sent = 0
+    received = 0
+    previous_poll = started
+    max_gap = 0.0
+    next_sample = started
+    timed_out = False
+    print('Pi trial: ' + str(trial), flush=True)
+    try:
+        with (trial / 'console.log').open('wb') as log, (trial / 'host-samples.jsonl').open('w') as host:
+            while True:
+                now = time.monotonic()
+                max_gap = max(max_gap, now-previous_poll)
+                previous_poll = now
+                if now-started > 1020:
+                    timed_out = True
+                    break
+                if now >= next_sample:
+                    host.write(json.dumps({'utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                                           'elapsed_s': now-started,
+                                           'loadavg': Path('/proc/loadavg').read_text().strip(),
+                                           'meminfo': Path('/proc/meminfo').read_text()})+'\n')
+                    host.flush()
+                    next_sample = now+1
+                if select.select([master], [], [], 0.1)[0]:
+                    try:
+                        data = os.read(master, 65536)
+                    except OSError:
+                        data = b''
+                    if not data:
+                        break
+                    log.write(data)
+                    log.flush()
+                    received += len(data)
+                    tail = (tail+data)[-16384:]
+                    match = re.search(rb'Pi emulation evidence: (/build/evidence/qemu-[^\r\n]+)', tail)
+                    if match:
+                        session = match.group(1).decode()
+                    if sent < len(commands) and re.search(rb'root@raspberrypi4-64:[^\r\n]*# ', tail):
+                        os.write(master, (commands[sent]+'\n').encode())
+                        sent += 1
+                        tail = b''
+                        if sent == len(commands):
+                            print('Guest experiment started.', flush=True)
+                elif proc.poll() is not None:
+                    break
+    finally:
+        if timed_out and proc.poll() is None:
+            proc.terminate()
+        code = proc.wait(timeout=15)
+        os.close(master)
+    console = (trial / 'console.log').read_bytes().replace(b'\r', b'')
+    files = re.findall(rb'\nQTOOTH_FILE_BEGIN ([A-Za-z0-9_.-]+)\n(.*?)\nQTOOTH_FILE_END \1\n', console, re.S)
+    guest = trial / 'guest'
+    guest.mkdir()
+    for name, contents in files:
+        if name in (b'.', b'..'):
+            raise ValueError('Invalid serial result name')
+        (guest / name.decode()).write_bytes(contents)
+    result = re.findall(rb'\nQTOOTH_RESULT (\d+)\n', console)
+    status = int(result[-1]) if result else None
+    outcome = {'launcher_exit': code, 'host_timeout': timed_out, 'guest_status': status,
+               'files_received': len(files), 'commands_sent': sent, 'session': session,
+               'elapsed_s': time.monotonic()-started, 'bytes_drained': received,
+               'max_poll_gap_s': max_gap, 'profile': options.profile, 'image': options.image,
+               'tcg_thread': options.tcg_thread, 'condition': options.condition}
+    (trial / 'capture-outcome.json').write_text(json.dumps(outcome, indent=2)+'\n')
+    print(json.dumps(outcome), flush=True)
+    return int(code != 0 or timed_out or status != 0 or not files)
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

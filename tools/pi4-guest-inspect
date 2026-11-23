@@ -1,0 +1,153 @@
+#!/bin/sh
+## @file
+## @brief Inspect and measure a disposable Pi guest, exporting serial evidence.
+## @details Uploaded into /run by pi-qemu-capture; never installed in deployment images.
+
+## @brief Run a required command and retain failures while continuing evidence collection.
+## @param ... Command and arguments.
+## @return The command status, also recorded in failures.
+check() {
+    "$@"
+    qtooth_status=$?
+    if [ "$qtooth_status" -ne 0 ]; then
+        echo "CHECK_FAILED ($qtooth_status): $*"
+        qtooth_failures=$((qtooth_failures + 1))
+    fi
+    return "$qtooth_status"
+}
+
+## @brief Verify runtime attribution and retain a settled base-image observation.
+## @return Nonzero if required identity, runtime or snapshot checks fail.
+inspect() {
+    qtooth_failures=0
+    uname -a
+    cat /proc/1/comm
+    busybox | head -n 1
+    tr '\000' '\n' < /sys/firmware/devicetree/base/compatible
+    check test "$(uname -m)" = aarch64
+    check test "$(cat /proc/1/comm)" = systemd
+    check grep -aq raspberrypi,4-model-b /sys/firmware/devicetree/base/compatible
+    check systemctl is-active dbus
+    check test "$(uname -r)" = "$QTOOTH_EXPECTED_RELEASE"
+    zcat /proc/config.gz > /run/qtooth-trial/running.config
+    sha256sum /run/qtooth-trial/running.config
+    check test "$(sha256sum /run/qtooth-trial/running.config | cut -d ' ' -f 1)" = "$QTOOTH_EXPECTED_CONFIG"
+    if [ "$QTOOTH_PROFILE" = rt ]; then
+        check grep -qx CONFIG_PREEMPT_RT=y /run/qtooth-trial/running.config
+        qtooth_preemption=preempt_rt
+    else
+        check grep -qx '# CONFIG_PREEMPT_RT is not set' /run/qtooth-trial/running.config
+        qtooth_preemption=preempt
+    fi
+    for qtooth_module in hci_uart i2c_bcm2835 i2c_dev spi_bcm2835; do
+        qtooth_vermagic=$(modinfo -F vermagic "$qtooth_module")
+        echo "$qtooth_module: $qtooth_vermagic"
+        check test "$qtooth_vermagic" = "$QTOOTH_EXPECTED_RELEASE SMP $qtooth_preemption mod_unload modversions aarch64"
+    done
+    systemctl --failed --no-pager
+    check test -z "$(systemctl --failed --no-legend --plain)"
+    systemctl show bluetooth hciuart -p ActiveState -p ConditionResult -p Result
+    check /usr/libexec/bluetooth/bluetoothd --version
+    check test ! -e /root/qtooth-snapshot-probe
+    echo snapshot-discarded
+    for qtooth_comm in /proc/[0-9]*/comm; do
+        case $(cat "$qtooth_comm" 2>/dev/null) in irq/*) cat "$qtooth_comm";; esac
+    done
+    cat /proc/interrupts > /run/qtooth-trial/interrupts.txt
+    sleep 30
+    cat /proc/meminfo > /run/qtooth-trial/meminfo.txt
+    systemctl show -p UserspaceTimestampMonotonic -p FinishTimestampMonotonic > /run/qtooth-trial/boot.txt
+    cat /sys/devices/system/clocksource/clocksource0/current_clocksource > /run/qtooth-trial/clocksource.txt
+    dmesg > /run/qtooth-trial/dmesg.txt
+    rm /run/qtooth-trial/running.config
+    touch /root/qtooth-snapshot-probe
+    sync
+    test "$qtooth_failures" -eq 0
+}
+
+## @brief Stop any experiment children on an interrupted guest script.
+## @return None; cleanup is best effort and normal waits record workload status.
+cleanup() {
+    for qtooth_pid in "${qtooth_test_pid:-}" "${qtooth_stress_pid:-}"; do
+        if [ -n "$qtooth_pid" ]; then
+            kill "$qtooth_pid" 2>/dev/null || :
+            wait "$qtooth_pid" 2>/dev/null || :
+        fi
+    done
+}
+
+## @brief Run pinned-tool help checks and one finite idle/load latency trial.
+## @return Nonzero on failed tools, workload status, scheduling setup or cleanup.
+exercise() {
+    check cyclictest --help > /run/qtooth-trial/cyclictest-help.txt 2>&1
+    check stress-ng --version > /run/qtooth-trial/stress-version.txt 2>&1
+    check stress-ng --help > /run/qtooth-trial/stress-help.txt 2>&1
+    check ps --version > /run/qtooth-trial/ps-version.txt 2>&1
+    check chrt --version > /run/qtooth-trial/chrt-version.txt 2>&1
+    qtooth_duration=60
+    qtooth_load_duration=75
+    qtooth_lead=5
+    if [ "$QTOOTH_TRIAL_CONDITION" = smoke ]; then
+        qtooth_duration=5
+        qtooth_load_duration=12
+        qtooth_lead=1
+    fi
+    qtooth_test_pid=
+    qtooth_stress_pid=
+    trap cleanup EXIT INT TERM
+    if [ "$QTOOTH_TRIAL_CONDITION" = load ] || [ "$QTOOTH_TRIAL_CONDITION" = smoke ]; then
+        echo "stress-ng --cpu 2 --vm 1 --vm-bytes 134217728 --vm-keep --timeout ${qtooth_load_duration}s --metrics-brief" > /run/qtooth-trial/load-command.txt
+        stress-ng --cpu 2 --vm 1 --vm-bytes 134217728 --vm-keep --timeout "${qtooth_load_duration}s" --metrics-brief > /run/qtooth-trial/stress.log 2>&1 &
+        qtooth_stress_pid=$!
+        sleep "$qtooth_lead"
+    fi
+    echo "cyclictest --default-system --policy=fifo -p80 -t1 -a3 -c0 -i1000 -m -D$qtooth_duration -q -h10000 --histfile=/run/qtooth-trial/latency.hist --json=/run/qtooth-trial/latency.json" > /run/qtooth-trial/cyclic-command.txt
+    cat /proc/uptime > /run/qtooth-trial/measurement-start.txt
+    cyclictest --default-system --policy=fifo -p80 -t1 -a3 -c0 -i1000 -m -D"$qtooth_duration" -q -h10000 --histfile=/run/qtooth-trial/latency.hist --json=/run/qtooth-trial/latency.json > /run/qtooth-trial/cyclictest.log 2>&1 &
+    qtooth_test_pid=$!
+    sleep 1
+    ps -L -p "$qtooth_test_pid" -o pid,tid,cls,rtprio,psr,comm > /run/qtooth-trial/scheduling.txt
+    for qtooth_task in /proc/"$qtooth_test_pid"/task/*; do
+        chrt -p "${qtooth_task##*/}" >> /run/qtooth-trial/scheduling.txt 2>&1
+    done
+    check grep -Eq '[[:space:]]FF[[:space:]]+80[[:space:]]+3[[:space:]]+cyclictest$' /run/qtooth-trial/scheduling.txt
+    wait "$qtooth_test_pid"
+    qtooth_test_status=$?
+    qtooth_test_pid=
+    echo "$qtooth_test_status" > /run/qtooth-trial/cyclictest-status.txt
+    check test "$qtooth_test_status" -eq 0
+    cat /proc/uptime > /run/qtooth-trial/measurement-end.txt
+    check test -s /run/qtooth-trial/latency.hist
+    check test -s /run/qtooth-trial/latency.json
+    if [ -n "$qtooth_stress_pid" ]; then
+        wait "$qtooth_stress_pid"
+        qtooth_load_status=$?
+        qtooth_stress_pid=
+        echo "$qtooth_load_status" > /run/qtooth-trial/stress-status.txt
+        check test "$qtooth_load_status" -eq 0
+    fi
+    for qtooth_comm in /proc/[0-9]*/comm; do
+        case $(cat "$qtooth_comm" 2>/dev/null) in
+            stress-ng*|cyclictest) echo "Remaining worker: $qtooth_comm"; qtooth_failures=$((qtooth_failures + 1));;
+        esac
+    done
+    dmesg > /run/qtooth-trial/dmesg-after.txt
+    trap - EXIT INT TERM
+    test "$qtooth_failures" -eq 0
+}
+
+mkdir -p /run/qtooth-trial
+inspect > /run/qtooth-trial/inspect.log 2>&1
+qtooth_result=$?
+if [ "$qtooth_result" -eq 0 ] && [ "$QTOOTH_TRIAL_CONDITION" != inspect ]; then
+    exercise > /run/qtooth-trial/exercise.log 2>&1
+    qtooth_result=$?
+fi
+echo "$qtooth_result" > /run/qtooth-trial/status.txt
+for qtooth_file in /run/qtooth-trial/*; do
+    printf '\nQTOOTH_FILE_BEGIN %s\n' "${qtooth_file##*/}"
+    cat "$qtooth_file"
+    printf '\nQTOOTH_FILE_END %s\n' "${qtooth_file##*/}"
+done
+echo "QTOOTH_RESULT $qtooth_result"
+systemctl poweroff

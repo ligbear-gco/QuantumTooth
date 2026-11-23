@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""@file
+@brief Summarize retained Pi artifacts and trials without rerunning experiments.
+@details Writes generated JSON under build/; raw failures and individual trials remain.
+"""
+import argparse
+import bz2
+import hashlib
+import json
+from pathlib import Path
+import re
+
+
+def fields(path):
+    """@brief Read numeric kernel-memory or systemd timestamp fields.
+    @param path Optional text evidence file.
+    @return Mapping of field names to integer values.
+    """
+    if not path.exists():
+        return {}
+    return {name: int(value) for name, value in re.findall(
+        r'^([A-Za-z_]+)[:=]\s*(\d+)', path.read_text(), re.M)}
+
+
+def sizes(evidence, records):
+    """@brief Attribute format sizes and stream the uncompressed deployment size/hash.
+    @param evidence Selection evidence directory.
+    @param records Frozen artifact identifiers from the build collector.
+    @return Size records, including a cached streamed WIC observation.
+    """
+    result = []
+    cache = evidence / 'wic-stream-size.json'
+    for item in records:
+        name = Path(item['path']).name
+        kind = ('kernel' if name.startswith('Image') else
+                'ext4' if name.endswith('.ext4') else
+                'wic.bz2' if name.endswith('.wic.bz2') else None)
+        if kind is None:
+            continue
+        result.append({'format': kind, **item})
+        if kind == 'wic.bz2':
+            saved = json.loads(cache.read_text()) if cache.exists() else {}
+            if saved.get('compressed_sha256') != item['sha256']:
+                source = evidence.parent / item['path'].removeprefix('/build/')
+                count = 0
+                digest = hashlib.sha256()
+                with bz2.open(source, 'rb') as stream:
+                    while block := stream.read(1024*1024):
+                        count += len(block)
+                        digest.update(block)
+                saved = {'format': 'wic (streamed uncompressed)', 'bytes': count,
+                         'sha256': digest.hexdigest(), 'compressed_sha256': item['sha256']}
+                cache.write_text(json.dumps(saved, indent=2)+'\n')
+            result.append(saved)
+    return result
+
+
+def trial(path):
+    """@brief Read one completed capture, retaining failures and raw-data attribution.
+    @param path Capture outcome file.
+    @return Trial summary with memory, boot, latency and host-load observations.
+    """
+    result = {'evidence': str(path.parent), **json.loads(path.read_text())}
+    guest = path.parent / 'guest'
+    memory = fields(guest / 'meminfo.txt')
+    boot = fields(guest / 'boot.txt')
+    if memory:
+        result['memory_kib'] = {'total': memory['MemTotal'], 'available': memory['MemAvailable'],
+                                'used_total_minus_available': memory['MemTotal']-memory['MemAvailable']}
+    if 'FinishTimestampMonotonic' in boot:
+        result['boot_seconds'] = boot['FinishTimestampMonotonic']/1_000_000
+    if (guest / 'latency.json').exists():
+        raw = json.loads((guest / 'latency.json').read_text())
+        latency = raw['thread']['0']
+        hist = (guest / 'latency.hist').read_text()
+        overflow = int(re.search(r'^# Histogram Overflows:\s+(\d+)', hist, re.M).group(1))
+        buckets = sum(int(line.split()[1]) for line in hist.splitlines()
+                      if re.match(r'^\d+\s+\d+', line))
+        result['latency_us'] = {key: latency[key] for key in ('cycles', 'min', 'avg', 'max', 'cpu')}
+        result['latency_us'].update(histogram_samples=buckets, histogram_overflow=overflow)
+        start = float((guest / 'measurement-start.txt').read_text().split()[0])
+        end = float((guest / 'measurement-end.txt').read_text().split()[0])
+        result['start_through_wait_seconds'] = round(end-start, 2)
+    samples = path.parent / 'host-samples.jsonl'
+    if samples.exists():
+        loads = []
+        incomplete = 0
+        for line in samples.read_text(errors='replace').splitlines():
+            try:
+                loads.append(float(json.loads(line)['loadavg'].split()[0]))
+            except (json.JSONDecodeError, KeyError, ValueError):
+                incomplete += 1
+        if loads:
+            result['host_load1_range'] = [min(loads), max(loads)]
+        if incomplete:
+            result['incomplete_host_sample_lines'] = incomplete
+    log = guest / 'dmesg-after.txt'
+    if not log.exists():
+        log = guest / 'dmesg.txt'
+    if log.exists():
+        result['kernel_observations'] = [line for line in log.read_text().splitlines()
+                                         if re.search(r'rcu:.*stall|BUG:|WARNING:|hrtimer: interrupt took', line)]
+    return result
+
+
+def main():
+    """@brief Summarize every completed selection/capture without hiding failed runs.
+    @return None; missing or malformed evidence raises an error.
+    """
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--output', type=Path, default=Path('build/pi4-prevalidation-summary.json'))
+    options = parser.parse_args()
+    selections = {}
+    for profile in ('nonrt', 'rt'):
+        for image in ('base', 'diagnostic'):
+            evidence = Path(f'build/raspberrypi4-64-{profile}-{image}/evidence')
+            artifact_file = evidence / 'artifacts.json'
+            if not artifact_file.exists():
+                continue
+            records = json.loads(artifact_file.read_text())
+            selections[f'{profile}/{image}'] = {
+                'artifacts': records, 'sizes': sizes(evidence, records),
+                'trials': [trial(p) for p in sorted(evidence.glob('*/capture-outcome.json'))]}
+    options.output.write_text(json.dumps(selections, indent=2)+'\n')
+    print(str(options.output))
+
+
+if __name__ == '__main__':
+    main()

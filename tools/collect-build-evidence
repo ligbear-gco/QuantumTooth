@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""@file
+@brief Freeze identifiers for a successful build and its exact boot inputs.
+@details Run inside the kas build shell, from /build, after dumping metadata.
+"""
+
+import configparser
+import hashlib
+import json
+from pathlib import Path
+import re
+import shlex
+import shutil
+import subprocess
+
+
+def metadata(path, name):
+    """@brief Read an expanded scalar from a BitBake environment dump.
+    @param path Environment dump path.
+    @param name Exact BitBake variable name.
+    @return Expanded value; raise if absent.
+    """
+    match = re.search(r'^' + re.escape(name) + r'="(.*)"$', path.read_text(), re.M)
+    if match is None:
+        raise ValueError(f"Missing {name} in {path}")
+    return match.group(1)
+
+
+def digest(path):
+    """@brief Hash an artifact without loading the rootfs into RAM.
+    @param path File to hash.
+    @return SHA-256 hexadecimal digest.
+    """
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def main():
+    """@brief Collect final configuration, manifests, hashes and sizes.
+    @return None; a missing artifact or wrong kernel profile raises an error.
+    """
+    evidence = Path("evidence")
+    machine = metadata(evidence / "image.env", "MACHINE")
+    profile = metadata(evidence / "image.env", "QTOOTH_KERNEL_PROFILE")
+    target = metadata(evidence / "image.env", "PN")
+    if (machine, profile, target) not in {
+        ("qemuarm64", "nonrt", "qtooth-image-base"),
+        *(("raspberrypi4-64", p, i) for p in ("nonrt", "rt")
+          for i in ("qtooth-image-base", "qtooth-image-diagnostic")),
+    }:
+        raise ValueError(f"Unsupported evidence selection: {machine}/{profile}/{target}")
+    deploy = Path(f"tmp/deploy/images/{machine}").resolve()
+    link = metadata(evidence / "image.env", "IMAGE_LINK_NAME")
+    if machine == "qemuarm64":
+        boot = (deploy / f"{link}.qemuboot.conf").resolve(strict=True)
+        config = configparser.ConfigParser()
+        config.read(boot)
+        kernel = (deploy / config["config_bsp"]["qb_default_kernel"]).resolve(strict=True)
+        image = config["config_bsp"]["image_name"]
+        rootfs = (deploy / f"{image}.ext4").resolve(strict=True)
+        manifest = (deploy / f"{image}.manifest").resolve(strict=True)
+        artifacts = [boot, kernel, rootfs, manifest]
+        selection = {"QTOOTH_QEMUBOOT": boot, "QTOOTH_ROOTFS": rootfs}
+        shutil.copy2(boot, evidence / "image.qemuboot.conf")
+    else:
+        kernel = (deploy / "Image").resolve(strict=True)
+        dtb = (deploy / "bcm2711-rpi-4-b.dtb").resolve(strict=True)
+        rootfs = (deploy / f"{link}.ext4").resolve(strict=True)
+        manifest = (deploy / f"{link}.manifest").resolve(strict=True)
+        wic = (deploy / f"{link}.wic.bz2").resolve(strict=True)
+        bmap = (deploy / f"{link}.wic.bmap").resolve(strict=True)
+        artifacts = [kernel, dtb, rootfs, wic, bmap, manifest]
+        selection = {"QTOOTH_KERNEL": kernel, "QTOOTH_DTB": dtb,
+                     "QTOOTH_ROOTFS": rootfs, "QTOOTH_WIC": wic}
+    kernel_build = Path(metadata(evidence / "kernel.env", "B"))
+    kernel_config = ((deploy / "qtooth-kernel.config").resolve(strict=True)
+                     if machine == "raspberrypi4-64" else kernel_build / ".config")
+    final = kernel_config.read_text()
+    rt_setting = "CONFIG_PREEMPT_RT=y" if profile == "rt" else "# CONFIG_PREEMPT_RT is not set"
+    for setting in (rt_setting, "CONFIG_IKCONFIG=y", "CONFIG_IKCONFIG_PROC=y",
+                    "# CONFIG_KGDB is not set", "# CONFIG_CGROUP_DEBUG is not set",
+                    "# CONFIG_RCU_TRACE is not set", "# CONFIG_TTY_PRINTK is not set"):
+        if setting not in final.splitlines():
+            raise ValueError(f"Required kernel setting absent: {setting}")
+    shutil.copy2(kernel_config, evidence / "kernel.config")
+    release_file = ((deploy / "qtooth-kernel.release").resolve(strict=True)
+                    if machine == "raspberrypi4-64" else kernel_build / "include/config/kernel.release")
+    shutil.copy2(release_file, evidence / "kernel.release")
+    shutil.copy2(manifest, evidence / "image.manifest")
+    for log in kernel_build.parent.glob("temp/log.do_kernel_config*"):
+        shutil.copy2(log, evidence / log.name)
+    kernel_source = Path(metadata(evidence / "kernel.env", "S"))
+    if machine == "raspberrypi4-64":
+        shutil.copy2(deploy / "qtooth-kernel-source.txt", evidence / "kernel-source.txt")
+        artifacts += [kernel_config, release_file]
+    else:
+        with (evidence / "kernel-source.txt").open("w") as stream:
+            for args in (("rev-parse", "HEAD"), ("status", "--short"), ("diff", "--stat")):
+                subprocess.run(["git", "-C", str(kernel_source), *args], stdout=stream, check=True)
+    audit_dir = evidence / "kernel-audit"
+    audit_dir.mkdir(exist_ok=True)
+    for audit in (kernel_source / ".kernel-meta/cfg").glob("*.txt"):
+        shutil.copy2(audit, audit_dir / audit.name)
+    if machine == "raspberrypi4-64":
+        for audit in (deploy / "qtooth-kernel-audit").iterdir():
+            shutil.copy2(audit, audit_dir / audit.name)
+    if machine == "raspberrypi4-64":
+        required = ("CONFIG_ARCH_BCM2835", "CONFIG_SERIAL_AMBA_PL011",
+                    "CONFIG_SERIAL_AMBA_PL011_CONSOLE", "CONFIG_MMC_SDHCI_IPROC",
+                    "CONFIG_MMC_BCM2835", "CONFIG_EXT4_FS", "CONFIG_HIGH_RES_TIMERS",
+                    "CONFIG_BT", "CONFIG_BT_HCIUART", "CONFIG_BT_HCIUART_BCM",
+                    "CONFIG_I2C_BCM2835", "CONFIG_I2C_CHARDEV", "CONFIG_SPI_BCM2835", "CONFIG_PINCTRL_BCM2835",
+                    "CONFIG_USB_XHCI_HCD")
+        for symbol in required:
+            if not re.search(r"^" + symbol + r"=[ym]$", final, re.M):
+                raise ValueError(f"Required Pi driver absent: {symbol}")
+        installed = Path(metadata(evidence / "image.env", "IMAGE_ROOTFS"))
+        modules = installed / "lib/modules"
+        if not modules.exists():
+            modules = installed / "usr/lib/modules"
+        release = (evidence / "kernel.release").read_text().strip()
+        releases = sorted(p.name for p in modules.iterdir() if p.is_dir())
+        if releases != [release]:
+            raise ValueError(f"Installed module releases {releases} != {release}")
+        module_records = [{"path": str(p.relative_to(installed)), "sha256": digest(p)}
+                          for p in sorted((modules / release).rglob("*")) if p.is_file()]
+        if not module_records:
+            raise ValueError("No installed Pi module artifacts")
+        required_modules = {"CONFIG_BT_HCIUART": "hci_uart.ko",
+                            "CONFIG_I2C_BCM2835": "i2c-bcm2835.ko",
+                            "CONFIG_I2C_CHARDEV": "i2c-dev.ko",
+                            "CONFIG_SPI_BCM2835": "spi-bcm2835.ko"}
+        for symbol, filename in required_modules.items():
+            if f"{symbol}=m" in final.splitlines() and not any(
+                    Path(r["path"]).name.split(".ko")[0] == filename.removesuffix(".ko")
+                    for r in module_records):
+                raise ValueError(f"Required modular driver not installed: {symbol}: {filename}")
+        (evidence / "modules.json").write_text(json.dumps(module_records, indent=2) + "\n")
+        native_roots = [Path(metadata(evidence / env, "RECIPE_SYSROOT_NATIVE"))
+                        for env in ("image.env", "kernel.env")]
+        modinfo = next((native / p for native in native_roots
+                        for p in ("usr/sbin/modinfo", "sbin/modinfo", "usr/bin/modinfo")
+                        if (native / p).exists()), None)
+        if modinfo is None:
+            raise ValueError("Native modinfo missing from kernel sysroot")
+        selected_modules = [r for r in module_records if any(
+            name in Path(r["path"]).name for name in required_modules.values())]
+        if not selected_modules:
+            raise ValueError("No loadable module available for vermagic inspection")
+        for record in selected_modules:
+            vermagic = subprocess.check_output(
+                [str(modinfo), "-F", "vermagic", str(installed / record["path"])], text=True).strip()
+            if not vermagic.startswith(release + " "):
+                raise ValueError(f"Wrong module vermagic: {record['path']}: {vermagic}")
+            if ("preempt_rt" in vermagic.split()) != (profile == "rt"):
+                raise ValueError(f"Wrong module preemption profile: {record['path']}: {vermagic}")
+            record["vermagic"] = vermagic
+        (evidence / "module-vermagic.json").write_text(json.dumps(selected_modules, indent=2) + "\n")
+        firmware = sorted(str(p.relative_to(installed)) for prefix in ("lib/firmware", "usr/lib/firmware")
+                          for p in (installed / prefix).rglob("*") if p.is_file())
+        for filename in ("BCM4345C0.hcd", "BCM4345C5.hcd"):
+            if not any(Path(p).name == filename for p in firmware):
+                raise ValueError(f"Required Pi Bluetooth firmware absent: {filename}")
+        for name in ("hciattach", "hciconfig", "hcitool", "bluetoothctl"):
+            path = installed / "usr/bin" / name
+            if not path.is_file() or not path.stat().st_mode & 0o111:
+                raise ValueError(f"Required BSP initialization command absent: {name}")
+        for name in ("btmon", "hcidump", "rctest", "l2test", "l2ping", "btmgmt", "sdptool", "rfcomm"):
+            if (installed / "usr/bin" / name).exists():
+                raise ValueError(f"Unneeded BlueZ tool installed in Pi image: {name}")
+        (evidence / "firmware.txt").write_text("\n".join(firmware) + "\n")
+        (evidence / "firmware.json").write_text(json.dumps([
+            {"path": p, "sha256": digest(installed / p)} for p in firmware], indent=2) + "\n")
+        for recipe in ("rpi-bootfiles", "bluez-firmware-rpidistro", "pi-bluetooth"):
+            with (evidence / f"{recipe}.env").open("w") as stream:
+                subprocess.run(["bitbake", "-e", recipe], stdout=stream, check=True)
+        qemu = Path(metadata(evidence / "image.env", "RECIPE_SYSROOT_NATIVE")) / "usr/bin/qemu-system-aarch64"
+        # The image's native tool closure is provided explicitly by tools/build.
+        subprocess.run([str(qemu), "--version"], check=True,
+                       stdout=(evidence / "qemu-version.txt").open("w"))
+        artifacts.append(qemu.resolve(strict=True))
+    records = [{"path": str(path), "bytes": path.stat().st_size, "sha256": digest(path)}
+               for path in artifacts]
+    (evidence / "artifacts.json").write_text(json.dumps(records, indent=2) + "\n")
+    (evidence / "boot.sha256").write_text("".join(
+        f"{entry['sha256']}  {entry['path']}\n" for entry in records))
+    (evidence / "boot-selection.env").write_text("".join(
+        f"{key}={shlex.quote(str(value))}\n" for key, value in selection.items()))
+    source_paths = sorted(path for directory in ("kas", "layers/meta-qtooth-platform", "tools")
+                          for path in (Path("/repo") / directory).rglob("*") if path.is_file())
+    (evidence / "project-inputs.sha256").write_text("".join(
+        f"{digest(path)}  {path}\n" for path in source_paths))
+    print(json.dumps(records, indent=2))
+
+
+if __name__ == "__main__":
+    main()

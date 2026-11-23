@@ -1,0 +1,24 @@
+# @file
+# @brief Locked Pi deployment candidate; console exceptions belong to QEMU derivatives.
+header:
+  version: 14
+  includes:
+    - kas/base.yml
+    - kas/profiles/nonrt.yml
+machine: raspberrypi4-64
+repos:
+  meta-raspberrypi:
+    url: https://github.com/agherzan/meta-raspberrypi.git
+    branch: wrynose
+    layers:
+      .:
+local_conf_header:
+  pi-platform: |
+    PREFERRED_PROVIDER_virtual/kernel:raspberrypi4-64 = "linux-raspberrypi"
+    PREFERRED_VERSION_linux-raspberrypi:raspberrypi4-64 = "6.18.%"
+    IMAGE_FSTYPES:raspberrypi4-64 = "ext4 wic.bz2 wic.bmap"
+    DISABLE_VC4GRAPHICS:raspberrypi4-64 = "1"
+    CMDLINE_SERIAL:raspberrypi4-64 = ""
+    SERIAL_CONSOLES:raspberrypi4-64 = ""
+    RPI_EXTRA_CONFIG:append:raspberrypi4-64 = "\ndtparam=krnbt=on\ndtoverlay=qtooth-platform-buses\n"
+    IMAGE_BOOT_FILES:append:raspberrypi4-64 = " qtooth-platform-buses.dtbo;overlays/qtooth-platform-buses.dtbo"

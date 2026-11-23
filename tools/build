@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+## @file
+## @brief Build an explicitly selected locked image and preserve its evidence.
+## @details With --check, resolve kas configuration and parse without building.
+## @return Nonzero if configuration, parsing, fetching, or building fails.
+set -euo pipefail
+qtooth_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$qtooth_root"
+source tools/build-selection
+qtooth_select "$@"
+if [[ ${#qtooth_args[@]} -gt 1 || (${#qtooth_args[@]} -eq 1 && "${qtooth_args[0]}" != --check) ]]; then
+    echo 'Usage: ./tools/build [--machine MACHINE] [--profile nonrt|rt] [--image base|diagnostic] [--check]' >&2
+    exit 2
+fi
+qtooth_evidence="$qtooth_build/evidence"
+mkdir -p "$qtooth_evidence"
+cp tools/build-tool.env "$qtooth_evidence/build-tool.env"
+git rev-parse HEAD > "$qtooth_evidence/project-revision.txt"
+git status --short > "$qtooth_evidence/project-status.txt"
+case "${qtooth_args[0]:-}" in
+    --check)
+        ./tools/kas "${qtooth_selectors[@]}" dump "$qtooth_config" > "$qtooth_evidence/kas-resolved.yml"
+        ./tools/kas "${qtooth_selectors[@]}" shell "$qtooth_config" -c "bitbake -p && bitbake -e $qtooth_target > evidence/image.env && bitbake -e virtual/kernel > evidence/kernel.env && bitbake -g $qtooth_target" \
+            2>&1 | tee "$qtooth_evidence/parse.log"
+        ;;
+    '')
+        ./tools/kas "${qtooth_selectors[@]}" dump "$qtooth_config" > "$qtooth_evidence/kas-resolved.yml"
+        ./tools/kas "${qtooth_selectors[@]}" build "$qtooth_config" 2>&1 | tee "$qtooth_evidence/build-$(date -u +%Y%m%dT%H%M%SZ).log"
+        ./tools/kas "${qtooth_selectors[@]}" shell "$qtooth_config" -c "bitbake -e $qtooth_target > evidence/image.env"
+        ./tools/kas "${qtooth_selectors[@]}" shell "$qtooth_config" -c '
+            set -eu
+            bitbake -e virtual/kernel > evidence/kernel.env
+            bitbake -e gcc-cross-aarch64 > evidence/gcc.env
+            bitbake -e binutils-cross-aarch64 > evidence/binutils.env
+            bitbake -e glibc > evidence/glibc.env
+            bitbake -e openssl > evidence/openssl.env
+            bitbake -e bluez5 > evidence/bluez5.env
+            bitbake -e qemu-system-native > evidence/qemu.env
+            python3 /repo/tools/collect-build-evidence
+        ' 2>&1 | tee "$qtooth_evidence/collect.log"
+        ;;
+    *) echo 'Usage: ./tools/build [--check]' >&2; exit 2 ;;
+esac

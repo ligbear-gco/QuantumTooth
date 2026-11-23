@@ -1,0 +1,13 @@
+header:
+  version: 14
+  includes:
+    - kas/base.yml
+    - kas/profiles/nonrt.yml
+machine: qemuarm64
+local_conf_header:
+  qemu-development: |
+    IMAGE_FEATURES:append:qemuarm64 = " empty-root-password serial-autologin-root"
+    IMAGE_FSTYPES:qemuarm64 = "ext4"
+    QB_DEFAULT_FSTYPE:qemuarm64 = "ext4"
+    QB_DEFAULT_KERNEL:qemuarm64 = "Image"
+    QB_SLIRP_OPT:qemuarm64 = "-netdev user,id=net0"

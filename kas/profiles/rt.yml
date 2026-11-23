@@ -1,0 +1,7 @@
+# @file
+# @brief Integrated RT selection for the same pinned Pi BSP/kernel family.
+header:
+  version: 14
+local_conf_header:
+  rt: |
+    QTOOTH_KERNEL_PROFILE = "rt"

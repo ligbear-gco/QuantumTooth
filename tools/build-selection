@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+## @file
+## @brief Shared, validated machine/profile/image selection for project helpers.
+
+## @brief Parse selectors and return other arguments in qtooth_args.
+## @param ... Command arguments; selectors may precede the underlying command.
+## @return Nonzero for unsupported or incomplete selectors.
+qtooth_select() {
+    qtooth_machine=qemuarm64 qtooth_profile=nonrt qtooth_image=base
+    qtooth_args=()
+    while (($#)); do
+        case "$1" in
+            --machine|--profile|--image)
+                [[ $# -ge 2 && "$2" != --* ]] || { echo "Missing value for $1" >&2; return 2; }
+                case "$1" in
+                    --machine) qtooth_machine=$2 ;;
+                    --profile) qtooth_profile=$2 ;;
+                    --image) qtooth_image=$2 ;;
+                esac
+                shift 2 ;;
+            *) qtooth_args+=("$1"); shift ;;
+        esac
+    done
+    case "$qtooth_machine/$qtooth_profile/$qtooth_image" in
+        qemuarm64/nonrt/base) qtooth_build=build/qemuarm64-nonrt ;;
+        raspberrypi4-64/nonrt/base|raspberrypi4-64/rt/base|raspberrypi4-64/nonrt/diagnostic|raspberrypi4-64/rt/diagnostic)
+            qtooth_build="build/$qtooth_machine-$qtooth_profile-$qtooth_image" ;;
+        *) echo "Unsupported selection: $qtooth_machine/$qtooth_profile/$qtooth_image; use qemuarm64/nonrt/base or raspberrypi4-64/{nonrt,rt}/{base,diagnostic}." >&2; return 2 ;;
+    esac
+    qtooth_config="kas/machines/$qtooth_machine.yml"
+    if [[ "$qtooth_profile" == rt ]]; then
+        [[ -f kas/profiles/rt.yml ]] || { echo 'RT profile is not implemented yet.' >&2; return 2; }
+        qtooth_config+=:kas/profiles/rt.yml
+    fi
+    if [[ "$qtooth_image" == diagnostic ]]; then
+        [[ -f kas/images/diagnostic.yml ]] || { echo 'Diagnostic image is not implemented yet.' >&2; return 2; }
+        qtooth_config+=:kas/images/diagnostic.yml
+    fi
+    qtooth_target="qtooth-image-$qtooth_image"
+    qtooth_selectors=(--machine "$qtooth_machine" --profile "$qtooth_profile" --image "$qtooth_image")
+}

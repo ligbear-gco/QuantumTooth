@@ -1,0 +1,23 @@
+header:
+  version: 14
+distro: qtooth
+target: qtooth-image-base
+repos:
+  qtooth:
+    layers:
+      layers/meta-qtooth-platform:
+  openembedded-core:
+    url: https://git.openembedded.org/openembedded-core
+    branch: wrynose
+    layers:
+      meta:
+  bitbake:
+    url: https://git.openembedded.org/bitbake
+    branch: '2.18'
+    layers:
+      .: disabled
+local_conf_header:
+  qtooth: |
+    CONF_VERSION = "2"
+    BB_NUMBER_THREADS = "8"
+    PARALLEL_MAKE = "-j 8"

@@ -1,0 +1,50 @@
+/**
+ * @file
+ * @brief Enable the HW-2 Pi controllers without binding a userspace SPI client.
+ * @details Keep I2C1 on GPIO2/3 at 100 kHz and SPI0 on GPIO9/10/11 with
+ * active-low CE0 on GPIO8. The future FPGA driver owns the SPI client.
+ */
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "raspberrypi,4-model-b", "brcm,bcm2711";
+
+    fragment@0 {
+        target = <&i2c1>;
+        __overlay__ {
+            status = "okay";
+            clock-frequency = <100000>;
+        };
+    };
+
+    fragment@1 {
+        target = <&spi0>;
+        __overlay__ {
+            status = "okay";
+            cs-gpios = <&gpio 8 1>;
+            num-cs = <1>;
+        };
+    };
+
+    fragment@2 {
+        target = <&spidev0>;
+        __overlay__ {
+            status = "disabled";
+        };
+    };
+
+    fragment@3 {
+        target = <&spidev1>;
+        __overlay__ {
+            status = "disabled";
+        };
+    };
+
+    fragment@4 {
+        target = <&spi0_cs_pins>;
+        __overlay__ {
+            brcm,pins = <8>;
+        };
+    };
+};

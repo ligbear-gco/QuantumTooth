@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""@file
+@brief Export temporary, attributed physical measurement copies of built Pi WICs.
+@details Run inside the selected kas shell. No source image or recipe is edited.
+"""
+import argparse
+import bz2
+import datetime
+import hashlib
+import json
+from pathlib import Path
+import re
+import shutil
+import subprocess
+
+
+def digest(path):
+    """@brief Stream one file's SHA-256.
+    @param path File path.
+    @return Hexadecimal digest.
+    """
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def main():
+    """@brief Prepare and audit a separate physical-only instrumented image.
+    @return None; a failed audit raises and leaves its evidence for inspection.
+    """
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('profile', choices=('rt', 'nonrt'))
+    parser.add_argument('variant', choices=('base', 'diagnostic'))
+    parser.add_argument('--smoke', action='store_true', help='Software fixture only; short protocol, never physical acceptance.')
+    args = parser.parse_args()
+    build = Path('/build')
+    repo = Path('/repo')
+    evidence = build/'evidence'
+    env = (evidence/'image.env').read_text()
+    for name, expected in (('MACHINE', 'raspberrypi4-64'),
+                           ('QTOOTH_KERNEL_PROFILE', args.profile),
+                           ('PN', 'qtooth-image-'+args.variant)):
+        assert re.search(r'^'+name+'="'+re.escape(expected)+'"$', env, re.M), name
+    native = Path(re.search(r'^RECIPE_SYSROOT_NATIVE="(.*)"$', env, re.M)[1])
+    debugfs = native/'sbin/debugfs'
+    mcopy = native/'usr/bin/mcopy'
+    fsck = native/'sbin/e2fsck'
+    records = json.loads((evidence/'artifacts.json').read_text())
+    wic = next(r for r in records if r['path'].endswith('.wic.bz2'))
+    assert digest(Path(wic['path'])) == wic['sha256']
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    out = evidence/('g1-measurement-'+stamp)
+    out.mkdir()
+    log = out/'preparation.log'
+
+    def command(argv):
+        """@brief Execute a native utility, retaining stdout/stderr and argv.
+        @param argv Program and argument vector.
+        @return Standard output; raises on nonzero exit status.
+        """
+        result = subprocess.run(list(map(str, argv)), capture_output=True)
+        with log.open('ab') as stream:
+            stream.write((json.dumps(list(map(str, argv)))+'\n').encode())
+            stream.write(result.stdout+result.stderr)
+        result.check_returncode()
+        return result.stdout
+
+    protocol = 'smoke' if args.smoke else 'full'
+    disk = out/('qtooth-g1-'+args.profile+'-'+args.variant+'-'+('smoke' if args.smoke else 'measure')+'.img')
+    with bz2.open(wic['path'], 'rb') as reader, disk.open('xb') as writer:
+        shutil.copyfileobj(reader, writer, 1024*1024)
+    with disk.open('rb') as stream:
+        mbr = stream.read(512)
+    assert mbr[510:512] == b'\x55\xaa'
+    partitions = [(int.from_bytes(mbr[p+8:p+12], 'little')*512,
+                   int.from_bytes(mbr[p+12:p+16], 'little')*512)
+                  for p in (446, 462)]
+    boot_offset, _ = partitions[0]
+    root_offset, root_size = partitions[1]
+    rootfs = out/'observer-rootfs.ext4'
+    with disk.open('rb') as reader, rootfs.open('xb') as writer:
+        reader.seek(root_offset)
+        remaining = root_size
+        while remaining:
+            data = reader.read(min(remaining, 1024*1024))
+            assert data
+            writer.write(data)
+            remaining -= len(data)
+
+    def edit(operation):
+        """@brief Apply one checked ext4 edit to the copy only.
+        @param operation debugfs command.
+        @return None; rejects diagnostic errors even if debugfs exits zero.
+        """
+        start = log.stat().st_size if log.exists() else 0
+        command([debugfs, '-w', '-R', operation, rootfs])
+        text = log.read_bytes()[start:].decode(errors='replace')
+        assert not re.search(r'not found|File exists|Usage:|while |Could not|No such', text, re.I), text
+
+    def read_file(path):
+        """@brief Read raw file contents from the unmounted copy.
+        @param path Absolute ext4 file path.
+        @return File bytes.
+        """
+        return command([debugfs, '-R', 'cat '+path, rootfs])
+
+    protected = ('/etc/shadow', '/etc/passwd', '/etc/fstab')
+    original_policy = {p: read_file(p) for p in protected}
+    for path in ('/usr/libexec/qtooth-g1', '/etc/systemd/system/timers.target.wants'):
+        if b'Inode:' not in command([debugfs, '-R', 'stat '+path, rootfs]):
+            edit('mkdir '+path)
+    staged = {
+        '/usr/libexec/qtooth-g1/record': repo/'tools/pi4-g1/record',
+        '/usr/libexec/qtooth-g1/inspect': repo/'tools/pi4-physical-inspect',
+    }
+    service = out/'qtooth-g1.service'
+    service.write_text((repo/'tools/pi4-g1/qtooth-g1.service').read_text()
+                       .replace('@PROFILE@', args.profile).replace('@VARIANT@', args.variant))
+    timer = out/'qtooth-g1.timer'
+    timer.write_text((repo/'tools/pi4-g1/qtooth-g1.timer').read_text())
+    if args.smoke:
+        service.write_text(service.read_text().replace(' full\n', ' smoke\n'))
+        timer.write_text(timer.read_text().replace('OnBootSec=120s', 'OnBootSec=60s'))
+        inspector = out/'inspect-smoke'
+        text = staged['/usr/libexec/qtooth-g1/inspect'].read_text()
+        for function in ('section', 'observe', 'check', 'show_file'):
+            text = text.replace(function+'() {', function+'() { printf "QTOOTH_INSPECT_'+function+'=%s\\n" "$*" > /dev/console;', 1)
+        inspector.write_text(text)
+        staged['/usr/libexec/qtooth-g1/inspect'] = inspector
+    staged['/etc/systemd/system/qtooth-g1.service'] = service
+    staged['/etc/systemd/system/qtooth-g1.timer'] = timer
+    assert b'timers.target' in read_file('/usr/lib/systemd/system/basic.target')
+    assert read_file('/usr/lib/systemd/system/timers.target')
+    for destination, source in staged.items():
+        edit('write '+str(source)+' '+destination)
+        edit('set_inode_field '+destination+' mode 0100644')
+        assert read_file(destination) == source.read_bytes()
+    edit('symlink /etc/systemd/system/timers.target.wants/qtooth-g1.timer ../qtooth-g1.timer')
+    assert b'Type: symlink' in command([debugfs, '-R', 'stat /etc/systemd/system/timers.target.wants/qtooth-g1.timer', rootfs])
+    assert all(read_file(p) == value for p, value in original_policy.items())
+    command([fsck, '-f', '-n', rootfs])
+    assert rootfs.stat().st_size == root_size
+    with disk.open('r+b') as writer, rootfs.open('rb') as reader:
+        writer.seek(root_offset)
+        shutil.copyfileobj(reader, writer, 1024*1024)
+    provenance = {
+        'profile': args.profile, 'variant': args.variant, 'protocol': protocol,
+        'preparation_tool_sha256': digest(repo/'tools/prepare-pi4-measurement'),
+        'source_wic': wic, 'source_artifacts': records,
+        'observer_files': {p: {'source': str(s), 'sha256': digest(s)} for p,s in staged.items()},
+        'instrumentation': 'Four files and one timer symlink added offline; packages, account policy, kernel and DT unchanged.',
+        'baseline': ('SOFTWARE SMOKE ONLY: timer at 60 s, 1 s settle, one short trial per condition.' if args.smoke else
+                     'Timer at 120 s, then three RAM samples 30 s apart; observer remains resident.'),
+        'boot_interval': 'Kernel monotonic origin to original systemd FinishTimestampMonotonic; excludes firmware.',
+        'physical_status': 'Not booted by this preparation tool.',
+    }
+    inputs = out/'qtooth-g1-inputs.json'
+    inputs.write_text(json.dumps(provenance, indent=2)+'\n')
+    command([mcopy, '-i', str(disk)+'@@'+str(boot_offset), inputs, '::/qtooth-g1-inputs.json'])
+    for name in ('config.txt', 'kernel8.img', 'bcm2711-rpi-4-b.dtb', 'overlays/qtooth-platform-buses.dtbo'):
+        extracted = out/Path(name).name
+        command([mcopy, '-i', str(disk)+'@@'+str(boot_offset), '::/'+name, extracted])
+        expected = ({'config.txt': 'ed0048766da0995cca724b1aa7c8b41771d1b7dd9245f9d1ce8884f39b6d079c',
+                     'overlays/qtooth-platform-buses.dtbo': 'de1eff255e7524aaf6d0fd123ab2de39ecb8683b5e5dfe1646fba6cee4d63625'}.get(name)
+                    or next(r['sha256'] for r in records if (name == 'kernel8.img' and Path(r['path']).name.startswith('Image-')) or Path(r['path']).name == name))
+        assert digest(extracted) == expected, name
+    assert digest(Path(wic['path'])) == wic['sha256']
+    result = {'image': str(disk), 'sha256': digest(disk), 'bytes': disk.stat().st_size,
+              'source_wic_sha256': wic['sha256'], 'preparation_checks': 'passed',
+              'physical_measurement': 'pending', 'inputs': provenance}
+    (out/'export.json').write_text(json.dumps(result, indent=2)+'\n')
+    (out/(disk.name+'.sha256')).write_text(result['sha256']+'  '+disk.name+'\n')
+    print(json.dumps({k:v for k,v in result.items() if k!='inputs'}, indent=2))
+
+
+if __name__ == '__main__':
+    main()

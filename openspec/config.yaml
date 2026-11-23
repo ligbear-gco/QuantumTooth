@@ -58,6 +58,8 @@ context: |
   Optional knowledge checks must not become approval gates or block authorized work.
   Questions and exploration do not authorize implementation or SoT revisions.
 
+  All written code must be documented using standard Doxygen tags.
+
 rules:
   proposal:
     - State affected baseline IDs and whether the feature conforms to both SoTs.

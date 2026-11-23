@@ -1,0 +1,13 @@
+# @file
+# @brief Run temporary collection after normal startup and power off afterward.
+[Unit]
+Description=Temporary QuantumTooth physical G1 measurements
+After=multi-user.target
+RequiresMountsFor=/boot
+SuccessAction=poweroff
+FailureAction=poweroff
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /usr/libexec/qtooth-g1/record @PROFILE@ @VARIANT@ full
+TimeoutStartSec=25min

@@ -1,0 +1,9 @@
+# @file
+# @brief Discoverable diagnostic Ethernet on a DHCP LAN or direct cable.
+[Match]
+Type=ether
+Name=!veth*
+
+[Network]
+DHCP=ipv4
+LinkLocalAddressing=ipv4

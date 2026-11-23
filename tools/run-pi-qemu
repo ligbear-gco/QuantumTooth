@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+"""@file
+@brief Derive and boot disposable Pi emulation artifacts in the selected kas shell.
+@details Requires completed build evidence; no mounting, networking or privilege.
+Pass --prepare-only to inspect derivatives and arguments without starting QEMU.
+"""
+
+import argparse
+import datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import pty
+import re
+import selectors
+import shutil
+import subprocess
+import sys
+import termios
+import time
+import tty
+
+
+def command(args, log=None):
+    """@brief Run a native tool, retaining diagnostics and rejecting failure.
+    @param args Argument vector without shell interpretation.
+    @param log Optional append-only transformation log.
+    @return Captured output as text.
+    """
+    result = subprocess.run([str(a) for a in args], text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if log is not None:
+        with log.open("a") as stream:
+            stream.write(json.dumps([str(a) for a in args]) + "\n" + result.stdout)
+    result.check_returncode()
+    return result.stdout
+
+
+def digest(path):
+    """@brief Hash one source or derived file.
+    @param path File path.
+    @return SHA-256 hexadecimal digest.
+    """
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def derive(rootfs, dtb, native, session):
+    """@brief Prepare serial-only login and legacy modeled SD on copied artifacts.
+    @param rootfs Original ext4 image, kept intact.
+    @param dtb Original Pi device tree, kept intact.
+    @param native Complete recipe native sysroot.
+    @param session Fresh evidence/derivative directory.
+    @return Derived disk and DTB paths.
+    """
+    log = session / "transformations.log"
+    disk = session / "serial-rootfs.sd"
+    tree = session / "raspi4b.dtb"
+    shutil.copyfile(rootfs, disk)
+    shutil.copyfile(dtb, tree)
+    # QEMU SD cards require power-of-two backing sizes; ext4 retains its size.
+    with disk.open("r+b") as stream:
+        stream.truncate(1 << (disk.stat().st_size - 1).bit_length())
+    debugfs = native / "sbin/debugfs"
+
+    def edit(operation):
+        """@brief Apply a checked debugfs edit to the derivative only.
+        @param operation One debugfs command.
+        @return Tool output; raise on filesystem edit errors.
+        """
+        output = command([debugfs, "-w", "-R", operation, disk], log)
+        if re.search(r"not found|File exists|Usage:|while |Could not|No such", output, re.I):
+            raise RuntimeError(output)
+        return output
+
+    def exists(path):
+        """@brief Test an ext4 path without relying on debugfs's exit status.
+        @param path Guest filesystem path.
+        @return Whether debugfs found its inode.
+        """
+        return "Inode:" in command([debugfs, "-R", f"stat {path}", disk], log)
+
+    def install(path, contents, mode="0100644"):
+        """@brief Write a local text file into the derivative filesystem.
+        @param path Guest destination path.
+        @param contents Text to install.
+        @param mode Octal inode mode.
+        @return None.
+        """
+        staged = session / (Path(path).name + ".input")
+        staged.write_text(contents)
+        if exists(path):
+            edit(f"rm {path}")
+        edit(f"write {staged} {path}")
+        edit(f"set_inode_field {path} mode {mode}")
+
+    shadow = command([debugfs, "-R", "cat /etc/shadow", disk], log)
+    # debugfs prints its version banner ahead of the requested file.
+    shadow = "\n".join(line for line in shadow.splitlines() if not line.startswith("debugfs "))
+    if not re.search(r"^root:[^:]*:", shadow, re.M):
+        raise ValueError("Root account absent from source shadow")
+    install("/etc/shadow", re.sub(r"^root:[^:]*:", "root::", shadow, count=1, flags=re.M) + "\n", "0100600")
+    for directory in ("/etc/systemd/system/serial-getty@ttyAMA0.service.d",
+                      "/etc/systemd/system/getty.target.wants"):
+        if not exists(directory):
+            edit(f"mkdir {directory}")
+    install("/etc/systemd/system/serial-getty@ttyAMA0.service.d/autologin.conf",
+            "[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin root --noclear %I 115200 linux\n")
+    link = "/etc/systemd/system/getty.target.wants/serial-getty@ttyAMA0.service"
+    if not exists(link):
+        edit(f"symlink {link} /usr/lib/systemd/system/serial-getty@.service")
+    if not re.search(r"^root::", command([debugfs, "-R", "cat /etc/shadow", disk], log), re.M):
+        raise ValueError("Serial derivative root-account edit did not take effect")
+    if "--autologin root" not in command([
+            debugfs, "-R", "cat /etc/systemd/system/serial-getty@ttyAMA0.service.d/autologin.conf", disk], log):
+        raise ValueError("Serial derivative getty override missing")
+    if not exists(link):
+        raise ValueError("Serial derivative getty was not enabled")
+
+    get = native / "usr/bin/fdtget"
+    put = native / "usr/bin/fdtput"
+
+    def symbol(name):
+        """@brief Resolve a pinned BSP DT symbol instead of assuming its bus path.
+        @param name Required symbol.
+        @return Absolute DT node path.
+        """
+        return command([get, "-t", "s", tree, "/__symbols__", name], log).strip()
+
+    uart = symbol("uart0")
+    auxiliary_uart = symbol("uart1")
+    mmc = symbol("mmc")
+    for node in (auxiliary_uart, symbol("emmc2"), symbol("mmcnr"), symbol("sdhost")):
+        command([put, "-t", "s", tree, node, "status", "disabled"], log)
+    command([put, "-t", "s", tree, uart, "status", "okay"], log)
+    for child in command([get, "-l", tree, uart], log).splitlines():
+        if child.startswith("bluetooth"):
+            command([put, "-t", "s", tree, f"{uart}/{child}", "status", "disabled"], log)
+    command([put, "-t", "s", tree, "/chosen", "stdout-path", uart + ":115200n8"], log)
+    # The deployment aliases reserve PL011 as serial1 for Bluetooth; QEMU uses it as console 0.
+    command([put, "-t", "s", tree, "/aliases", "serial0", uart], log)
+    command([put, "-t", "s", tree, "/aliases", "serial1", auxiliary_uart], log)
+    # QEMU's SD card is wired to legacy SDHCI, not the physical Pi's EMMC2.
+    command([put, "-t", "s", tree, mmc, "status", "okay"], log)
+    # The pinned IPROC driver accepts this compatible; the model advertises PIO.
+    command([put, "-t", "s", tree, mmc, "compatible", "brcm,bcm2835-sdhci"], log)
+    gic = symbol("gicv2")
+    phandle = command([get, "-t", "x", tree, gic, "phandle"], log).strip()
+    command([put, "-t", "x", tree, mmc, "interrupt-parent", phandle], log)
+    # bcm2838_peripherals.h wires EMMC/EMMC2 to GIC SPI 126, level high.
+    command([put, "-t", "x", tree, mmc, "interrupts", "0", "7e", "4"], log)
+    command([put, "-t", "s", tree, "/aliases", "mmc0", mmc], log)
+    (session / "derived.json").write_text(json.dumps([
+        {"path": str(path), "bytes": path.stat().st_size, "sha256": digest(path)}
+        for path in (disk, tree)], indent=2) + "\n")
+    return disk, tree
+
+
+def serial(args, session):
+    """@brief Relay interactive serial, retaining timeout/failure/shutdown evidence.
+    @param args QEMU argument vector.
+    @param session Evidence directory.
+    @return Exit code; 124 for a timeout and zero for observed clean shutdown.
+    """
+    master, slave = pty.openpty()
+    proc = subprocess.Popen(args, stdin=slave, stdout=slave, stderr=slave)
+    os.close(slave)
+    selector = selectors.DefaultSelector()
+    selector.register(master, selectors.EVENT_READ)
+    terminal = sys.stdin.isatty()
+    saved = termios.tcgetattr(0) if terminal else None
+    if terminal:
+        tty.setraw(0)
+        selector.register(0, selectors.EVENT_READ)
+    started = time.monotonic()
+    ready = False
+    shutdown = False
+    timed_out = False
+    tail = b""
+    try:
+        with (session / "serial.log").open("wb") as transcript:
+            while True:
+                elapsed = time.monotonic() - started
+                if elapsed > 900 or (not ready and elapsed > 180):
+                    timed_out = True
+                    break
+                events = selector.select(timeout=0.2)
+                if not events and proc.poll() is not None:
+                    break
+                for key, _ in events:
+                    if key.fd == master:
+                        try:
+                            data = os.read(master, 65536)
+                        except OSError:
+                            data = b""
+                        if not data:
+                            selector.unregister(master)
+                            break
+                        transcript.write(data)
+                        transcript.flush()
+                        os.write(1, data)
+                        tail = (tail + data)[-8192:]
+                        ready |= bool(re.search(rb"root@[^\r\n]*[#$] |login:", tail))
+                        shutdown |= b"reboot: Power down" in tail
+                    else:
+                        data = os.read(0, 4096)
+                        if data:
+                            os.write(master, data)
+                        else:
+                            selector.unregister(0)
+                if shutdown:
+                    break
+    finally:
+        if saved is not None:
+            termios.tcsetattr(0, termios.TCSADRAIN, saved)
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        selector.close()
+        os.close(master)
+        (session / "outcome.json").write_text(json.dumps({
+            "ready_seen": ready, "guest_powerdown_seen": shutdown,
+            "timeout": timed_out, "qemu_exit": proc.returncode,
+            "host_elapsed_seconds": time.monotonic() - started,
+            "boot_timeout_seconds": 180, "session_timeout_seconds": 900,
+        }, indent=2) + "\n")
+    return 124 if timed_out else (0 if shutdown else (proc.returncode or 1))
+
+
+def main():
+    """@brief Verify frozen Pi inputs, derive, boot and verify unchanged sources.
+    @return Serial session exit status.
+    """
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--tcg-thread", choices=("single", "multi"), default="single")
+    options = parser.parse_args()
+    evidence = Path("evidence").resolve()
+    if not (evidence / "boot-selection.env").exists():
+        raise SystemExit("Missing boot selection; complete the selected ./tools/build first.")
+    command(["sha256sum", "--check", evidence / "boot.sha256"])
+    image_env = (evidence / "image.env").read_text()
+    match = re.search(r'^RECIPE_SYSROOT_NATIVE="(.*)"$', image_env, re.M)
+    if match is None:
+        raise ValueError("Native recipe sysroot missing from image evidence")
+    native = Path(match.group(1))
+    records = json.loads((evidence / "artifacts.json").read_text())
+    kernel = next(Path(r["path"]) for r in records if Path(r["path"]).name.startswith("Image"))
+    rootfs = next(Path(r["path"]) for r in records if r["path"].endswith(".ext4"))
+    dtb = next(Path(r["path"]) for r in records if r["path"].endswith(".dtb"))
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    session = evidence / ("qemu-" + stamp)
+    session.mkdir()
+    for name in ("artifacts.json", "boot.sha256", "kernel.config", "kernel.release", "kas-resolved.yml"):
+        shutil.copy2(evidence / name, session / ("source-" + name))
+    (session / "launcher-inputs.sha256").write_text("".join(
+        f"{digest(Path('/repo/tools') / name)}  /repo/tools/{name}\n"
+        for name in ("run-pi-qemu", "run-qemu", "build-selection", "kas")))
+    qemu = native / "usr/bin/qemu-system-aarch64"
+    version = command([qemu, "--version"], session / "provenance.log")
+    if not version.startswith("QEMU emulator version 10.2.0\n"):
+        raise ValueError(f"Unexpected QEMU version: {version}")
+    command([qemu, "-machine", "help"], session / "provenance.log")
+    try:
+        disk, tree = derive(rootfs, dtb, native, session)
+        args = [str(qemu), "-M", "raspi4b", "-accel", f"tcg,thread={options.tcg_thread}", "-smp", "4",
+                "-m", "2048", "-display", "none", "-monitor", "none", "-serial", "stdio",
+                "-nic", "none", "-kernel", str(kernel), "-dtb", str(tree),
+                "-drive", f"file={disk},format=raw,if=sd,snapshot=on",
+                "-append", "console=ttyAMA0,115200 earlycon=pl011,mmio32,0xfe201000 "
+                "root=/dev/mmcblk0 rootfstype=ext4 rootwait rw"]
+        (session / "arguments.json").write_text(json.dumps(args, indent=2) + "\n")
+        print(f"Pi emulation evidence: {session}", flush=True)
+        if options.prepare_only:
+            (session / "prepared-only.txt").write_text("Preparation only; no guest boot was attempted.\n")
+            return 0
+        return serial(args, session)
+    finally:
+        command(["sha256sum", "--check", evidence / "boot.sha256"], session / "source-after.log")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

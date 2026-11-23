@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+## @file
+## @brief Boot the explicitly selected build in a disposable serial QEMU session.
+## @details Pi direct boot has no network; legacy defaults keep SLIRP without forwarding.
+## @return Nonzero if the boot configuration is absent or QEMU fails.
+set -euo pipefail
+qtooth_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$qtooth_root"
+source tools/build-selection
+qtooth_select "$@"
+qtooth_tcg_thread=single
+if [[ ${#qtooth_args[@]} -eq 2 && "${qtooth_args[0]}" == --tcg-thread && "${qtooth_args[1]}" =~ ^(single|multi)$ && "$qtooth_machine" == raspberrypi4-64 ]]; then
+    qtooth_tcg_thread=${qtooth_args[1]}
+elif [[ ${#qtooth_args[@]} -ne 0 ]]; then
+    echo 'Usage: ./tools/run-qemu [--machine MACHINE] [--profile nonrt|rt] [--image base|diagnostic] [--tcg-thread single|multi (Pi only)]' >&2
+    exit 2
+fi
+if [[ "$qtooth_machine" == raspberrypi4-64 ]]; then
+    exec ./tools/kas "${qtooth_selectors[@]}" shell "$qtooth_config" -c "exec python3 /repo/tools/run-pi-qemu --tcg-thread $qtooth_tcg_thread"
+fi
+exec ./tools/kas "${qtooth_selectors[@]}" shell "$qtooth_config" -c '
+    set -eu
+    test -f evidence/boot-selection.env || { echo "Missing boot selection; complete ./tools/build first." >&2; exit 1; }
+    sha256sum --check evidence/boot.sha256
+    . evidence/boot-selection.env
+    exec runqemu "$QTOOTH_QEMUBOOT" "$QTOOTH_ROOTFS" ext4 nographic slirp snapshot
+'

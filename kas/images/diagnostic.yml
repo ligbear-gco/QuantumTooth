@@ -1,0 +1,6 @@
+# @file
+# @brief Select inspection workloads independently of the shared Pi runtime.
+header:
+  version: 14
+target:
+  - qtooth-image-diagnostic

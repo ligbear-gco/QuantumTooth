@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+## @file
+## @brief Run the pinned kas wrapper with persistent, user-owned data roots.
+## @details Pass kas subcommands and arguments unchanged. No privileged mode.
+## @return The wrapper status, or nonzero for an unmet prerequisite.
+set -euo pipefail
+qtooth_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+source "$qtooth_root/tools/build-tool.env"
+cd "$qtooth_root"
+source "$qtooth_root/tools/build-selection"
+qtooth_select "$@"
+printf '%s  %s\n' "$QTOOTH_KAS_WRAPPER_SHA256" tools/vendor/kas-container | sha256sum --check --status || {
+    echo 'kas wrapper checksum mismatch; restore the pinned wrapper.' >&2
+    exit 1
+}
+command -v docker >/dev/null || { echo 'Docker CLI is required.' >&2; exit 1; }
+qtooth_engine=$(docker info --format '{{.OSType}}') || {
+    echo 'Docker daemon is unreachable; check Docker access in this shell.' >&2
+    exit 1
+}
+[[ "$qtooth_engine" == linux ]] || { echo 'A Linux Docker engine is required.' >&2; exit 1; }
+for qtooth_dir in upstream "$qtooth_build" cache/downloads cache/sstate cache/hashserve; do
+    mkdir -p "$qtooth_dir"
+    [[ -w "$qtooth_dir" ]] || { echo "Not writable: $qtooth_dir" >&2; exit 1; }
+done
+export KAS_CONTAINER_ENGINE=docker KAS_CONTAINER_IMAGE="$QTOOTH_KAS_IMAGE"
+export KAS_WORK_DIR="$qtooth_root/upstream" KAS_BUILD_DIR="$qtooth_root/$qtooth_build"
+export DL_DIR="$qtooth_root/cache/downloads" SSTATE_DIR="$qtooth_root/cache/sstate"
+export BB_HASHSERVE_DB_DIR="$qtooth_root/cache/hashserve"
+export KAS_REPO_MOUNT_OPT=ro
+unset KAS_KVM KAS_DOCKER_ROOTLESS
+exec "$qtooth_root/tools/vendor/kas-container" "${qtooth_args[@]}"
