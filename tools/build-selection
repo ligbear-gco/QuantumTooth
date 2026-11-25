@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
 ## @file
-## @brief Shared, validated machine/profile/image selection for project helpers.
+## @brief Shared, validated machine/profile/image/feature selection for project helpers.
 
 ## @brief Parse selectors and return other arguments in qtooth_args.
 ## @param ... Command arguments; selectors may precede the underlying command.
 ## @return Nonzero for unsupported or incomplete selectors.
 qtooth_select() {
-    qtooth_machine=qemuarm64 qtooth_profile=nonrt qtooth_image=base
+    qtooth_machine=qemuarm64 qtooth_profile=nonrt qtooth_image=base qtooth_feature=none
     qtooth_args=()
     while (($#)); do
         case "$1" in
-            --machine|--profile|--image)
+            --machine|--profile|--image|--feature)
                 [[ $# -ge 2 && "$2" != --* ]] || { echo "Missing value for $1" >&2; return 2; }
                 case "$1" in
                     --machine) qtooth_machine=$2 ;;
                     --profile) qtooth_profile=$2 ;;
                     --image) qtooth_image=$2 ;;
+                    --feature) qtooth_feature=$2 ;;
                 esac
                 shift 2 ;;
             *) qtooth_args+=("$1"); shift ;;
@@ -27,6 +28,15 @@ qtooth_select() {
             qtooth_build="build/$qtooth_machine-$qtooth_profile-$qtooth_image" ;;
         *) echo "Unsupported selection: $qtooth_machine/$qtooth_profile/$qtooth_image; use qemuarm64/nonrt/base or raspberrypi4-64/{nonrt,rt}/{base,diagnostic}." >&2; return 2 ;;
     esac
+    case "$qtooth_feature" in
+        none) ;;
+        ble)
+            [[ "$qtooth_machine/$qtooth_image" == raspberrypi4-64/diagnostic ]] || {
+                echo 'BLE requires raspberrypi4-64 with the diagnostic image.' >&2; return 2;
+            }
+            qtooth_build+=-ble ;;
+        *) echo 'Unsupported feature; use none or ble.' >&2; return 2 ;;
+    esac
     qtooth_config="kas/machines/$qtooth_machine.yml"
     if [[ "$qtooth_profile" == rt ]]; then
         [[ -f kas/profiles/rt.yml ]] || { echo 'RT profile is not implemented yet.' >&2; return 2; }
@@ -36,6 +46,13 @@ qtooth_select() {
         [[ -f kas/images/diagnostic.yml ]] || { echo 'Diagnostic image is not implemented yet.' >&2; return 2; }
         qtooth_config+=:kas/images/diagnostic.yml
     fi
+    if [[ "$qtooth_feature" == ble ]]; then
+        [[ -f kas/features/ble.yml ]] || { echo 'BLE feature is not implemented yet.' >&2; return 2; }
+        qtooth_config+=:kas/features/ble.yml
+    fi
     qtooth_target="qtooth-image-$qtooth_image"
     qtooth_selectors=(--machine "$qtooth_machine" --profile "$qtooth_profile" --image "$qtooth_image")
+    if [[ "$qtooth_feature" != none ]]; then
+        qtooth_selectors+=(--feature "$qtooth_feature")
+    fi
 }

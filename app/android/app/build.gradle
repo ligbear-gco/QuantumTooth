@@ -1,0 +1,65 @@
+// @file @brief Gradle owns native compilation, Codegen and the standalone debug bundle.
+apply plugin: 'com.android.application'
+apply plugin: 'org.jetbrains.kotlin.android'
+apply plugin: 'com.facebook.react'
+
+react {
+    root = file('../..')
+    reactNativeDir = file('../../node_modules/react-native')
+    codegenDir = file('../../node_modules/@react-native/codegen')
+    cliFile = file('../../node_modules/react-native/cli.js')
+    entryFile = file('../../index.js')
+    // An empty list makes the plugin bundle JS for debug as well as release.
+    debuggableVariants = []
+    autolinkLibrariesWithApp()
+}
+
+def repositoryRoot = rootProject.file('../..')
+def privatePair = new File(repositoryRoot, 'local/ble/pair.bin')
+def buildQToothNative = tasks.register('buildQToothNative', Exec) {
+    workingDir repositoryRoot
+    commandLine 'python3', 'app/scripts/build-native.py'
+    environment 'QTOOTH_PAIR_FILE', privatePair.absolutePath
+    inputs.files(fileTree('../../native') { exclude 'target/**' })
+    inputs.files(fileTree('../../../components/ble/core') { exclude 'target/**' })
+    inputs.file('../../scripts/build-native.py')
+    // optional() allows a clear validation error when the input is absent.
+    inputs.file(privatePair).optional()
+    outputs.file(layout.buildDirectory.file('generated/qtoothJni/arm64-v8a/libqtooth_android.so'))
+    doFirst {
+        if (!privatePair.isFile() || privatePair.length() != 64) {
+            throw new GradleException('Restore the existing 64-byte private pair at local/ble/pair.bin')
+        }
+    }
+}
+
+android {
+    namespace 'org.quantumtooth.proof'
+    compileSdk rootProject.ext.compileSdkVersion
+    buildToolsVersion rootProject.ext.buildToolsVersion
+    ndkVersion rootProject.ext.ndkVersion
+    defaultConfig {
+        applicationId 'org.quantumtooth.proof'
+        minSdk rootProject.ext.minSdkVersion
+        targetSdk rootProject.ext.targetSdkVersion
+        versionCode 1
+        versionName '0.1.0'
+        ndk { abiFilters 'arm64-v8a' }
+        externalNativeBuild { cmake { arguments '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON' } }
+    }
+    buildTypes {
+        debug { debuggable true }
+    }
+    sourceSets.main.jniLibs.srcDir(layout.buildDirectory.dir('generated/qtoothJni'))
+    packaging { jniLibs { useLegacyPackaging = false } }
+}
+tasks.named('preBuild').configure { dependsOn(buildQToothNative) }
+tasks.configureEach { task ->
+    if (task.name.startsWith('merge') && task.name.endsWith('JniLibFolders')) {
+        task.dependsOn(buildQToothNative)
+    }
+}
+dependencies {
+    implementation('com.facebook.react:react-android')
+    implementation('com.facebook.react:hermes-android')
+}

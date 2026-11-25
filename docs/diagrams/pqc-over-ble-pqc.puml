@@ -1,0 +1,39 @@
+@startuml
+title Version-1 authenticated establishment and best-effort records
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontName DejaVu Sans
+skinparam shadowing false
+hide footbox
+participant "Pi shared Rust core\nGATT server via BlueR" as pi
+participant "Peer shared Rust core\nnative now; Android adapter in G2.3" as peer
+note over pi, peer
+Unique pair PSK and two public identities supplied privately.
+Writes with response toward Pi; indications toward peer.
+All logical objects use bounded version-1 fragmentation.
+end note
+peer -> pi : ClientHello: version/suite, both identities, fresh peer nonce
+pi -> pi : Fresh Pi nonce and ephemeral ML-KEM-768 key pair
+pi -> peer : PiOffer: role/nonce + 1184-byte public key\n+ PSK HMAC bound to ClientHello and OfferCore
+peer -> peer : Verify pair authentication before encapsulation\nEncapsulate: 1088-byte ciphertext + shared secret
+peer -> pi : PeerFinish: ciphertext + PSK HMAC over transcript\n+ derived-key peer confirmation
+pi -> pi : Verify PSK HMAC; decapsulate; verify peer confirmation
+note over pi, peer
+T binds version, suite, roles, identities, nonces, public key and ciphertext.
+HKDF-SHA-256 derives directional keys/prefixes, confirmation keys and session ID.
+end note
+pi -> peer : PiFinish: derived-key confirmation bound to peer confirmation
+peer -> peer : Verify Pi confirmation
+peer --> pi : Normal finish-indication transport confirmation
+pi -> pi : AES-256-GCM encrypt complete record\nAAD: version/type/direction/session/sequence/length
+loop Bounded indications (MTU 23 supported)
+pi -> peer : 8-byte fragment header + encrypted-record bytes
+peer --> pi : ATT indication confirmation
+end
+peer -> peer : Reassemble; reject replay; verify tag\nOnly then release plaintext
+note over pi, peer
+Sender reports transport completion with delivery=unconfirmed.
+No application receipt/ACK/retry. Retained sends advance sequence only.
+Errors/close destroy session state; reconnect uses fresh keys/nonces.
+Native simulation does not establish physical Pixel decryption.
+end note
+@enduml

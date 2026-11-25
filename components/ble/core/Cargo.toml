@@ -1,0 +1,14 @@
+# @file
+# @brief Transport-independent authenticated session core, linked to system crypto.
+[package]
+name = "qtooth-ble-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+
+[dependencies]
+openssl = "=0.10.82"
+openssl-sys = "0.9"
+foreign-types = "0.3"
+zeroize = "1.9"

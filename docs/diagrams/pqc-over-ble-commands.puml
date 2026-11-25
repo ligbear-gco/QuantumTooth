@@ -1,0 +1,53 @@
+@startuml
+title send / sendkeep / closekeep — best effort
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontName DejaVu Sans
+skinparam shadowing false
+hide footbox
+actor "Shell user" as user
+participant "CLI\n(short-lived)" as cli
+participant "Pi Rust worker\n(session owner)" as worker
+participant "Native peer now\nforeground phone in G2.3" as peer
+group send: fresh, one-shot session
+user -> cli : send "Hello, world!"
+cli -> worker : Restricted local socket request
+alt Kept session exists
+worker --> cli : Busy; retained state unchanged
+else No session exists
+worker <-> peer : Connect + authenticated handshake (30 s from advertising)
+worker -> peer : One encrypted record, fragmented once
+peer --> worker : Normal ATT confirmations only
+worker -> worker : Disconnect; discard keys/counters
+worker --> cli : transport_success=true delivery=unconfirmed
+end
+end
+group sendkeep: worker survives successful CLI exit
+user -> cli : sendkeep "Hello, world!"
+cli -> worker : Restricted local socket request
+alt No session exists
+worker <-> peer : Fresh authenticated handshake
+worker -> worker : Start 120 s absolute lifetime
+else Existing session
+worker -> worker : Reserve next sequence/nonce; expiry unchanged
+end
+worker -> peer : One encrypted record, fragmented once
+peer --> worker : Normal ATT confirmations only
+worker --> cli : Local result handoff; delivery=unconfirmed
+note over worker, peer
+No application ACK, receipt, retry or reconnect.
+Only the worker retains the live connection and secrets.
+end note
+end
+group closekeep or expiry
+user -> cli : closekeep
+cli -> worker : Close (absent worker/session: successful no-op)
+worker -> peer : One authenticated close if reachable (2 s max)
+worker -> worker : Always tear down locally; discard secrets
+worker --> cli : local_closed=true remote_close=unconfirmed
+note over worker, peer
+Expiry cancels active work and destroys keys at 120 s.
+Cleanup is bounded to 2 s; close cannot extend lifetime.
+Link/subscription loss or failure requires fresh establishment next time.
+end note
+end
+@enduml

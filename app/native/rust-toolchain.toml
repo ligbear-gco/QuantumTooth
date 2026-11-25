@@ -1,0 +1,6 @@
+# @file
+# @brief Android-only compiler pin; leaves Pi/Yocto pins untouched.
+[toolchain]
+channel = "1.98.0"
+profile = "minimal"
+targets = ["aarch64-linux-android"]

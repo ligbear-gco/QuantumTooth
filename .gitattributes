@@ -3,3 +3,9 @@ docs/diagrams/ble.svg filter=lfs diff=lfs merge=lfs -text
 docs/diagrams/hardware.svg filter=lfs diff=lfs merge=lfs -text
 docs/diagrams/hwe-runtime.svg filter=lfs diff=lfs merge=lfs -text
 docs/diagrams/hwe-training.svg filter=lfs diff=lfs merge=lfs -text
+docs/diagrams/g2-pqc-over-ble.svg filter=lfs diff=lfs merge=lfs -text
+docs/diagrams/pqc-over-ble-commands.svg filter=lfs diff=lfs merge=lfs -text
+docs/diagrams/pqc-over-ble-pqc.svg filter=lfs diff=lfs merge=lfs -text
+docs/diagrams/pqc-over-ble-transport.svg filter=lfs diff=lfs merge=lfs -text
+docs/experiments/evidence_ble_phone.png filter=lfs diff=lfs merge=lfs -text
+docs/experiments/pqc-over-ble-evidence-vid.gif filter=lfs diff=lfs merge=lfs -text

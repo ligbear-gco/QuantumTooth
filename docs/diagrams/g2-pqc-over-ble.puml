@@ -1,0 +1,64 @@
+@startuml
+title G2 - Post-quantum messaging over BLE
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontName DejaVu Sans
+skinparam defaultFontSize 14
+skinparam shadowing false
+skinparam sequenceMessageAlign center
+skinparam ArrowColor #334155
+skinparam participantBorderColor #0891B2
+skinparam participantBackgroundColor #ECFEFF
+skinparam participantFontColor #0F172A
+skinparam sequenceLifeLineBorderColor #94A3B8
+skinparam noteBorderColor #94A3B8
+skinparam noteBackgroundColor #F8FAFC
+skinparam sequenceDividerBackgroundColor #E2E8F0
+skinparam sequenceDividerBorderColor #CBD5E1
+hide footbox
+
+participant "Raspberry Pi 4\nPeripheral / GATT server\nRust + BlueZ + OpenSSL" as pi
+participant "Pixel 7a\nCentral / GATT client\nReact Native UI + native Rust core" as phone
+
+== 1. Standard BLE / GATT setup ==
+phone -> phone : Scan for the secure service
+pi --> phone : Advertise custom service UUID
+phone -> pi : Connect; negotiate ATT MTU
+phone -> pi : Discover GATT service and RX / TX characteristics
+pi --> phone : Service and characteristic handles
+phone -> pi : Write TX CCCD: enable indications
+pi --> phone : ATT write response
+
+== 2. Authenticated post-quantum key establishment ==
+phone -> pi : RX write(s): ClientHello + fresh nonce
+pi --> phone : ATT write response(s)
+pi -> phone : TX indication(s): PiOffer\nML-KEM-768 public key + nonce + pair authentication
+phone --> pi : ATT confirmation(s)
+phone -> phone : Verify pair; encapsulate shared secret
+phone -> pi : RX write(s): PeerFinish\nKEM ciphertext + pair authentication + key confirmation
+pi --> phone : ATT write response(s)
+pi -> pi : Verify pair; decapsulate; confirm peer key
+pi -> phone : TX indication: PiFinish / Pi key confirmation
+phone --> pi : ATT confirmation
+phone -> phone : Verify Pi key confirmation
+note over pi, phone
+HMAC-SHA-256 authenticates the provisioned pair.
+HKDF-SHA-256 derives directional traffic keys.
+Large objects use bounded application fragments.
+end note
+
+== 3. Encrypted message and visible phone proof ==
+pi -> pi : AES-256-GCM encrypts "Hello, world!"
+pi -> phone : TX indication(s): encrypted application record
+phone --> pi : ATT confirmation(s)
+phone -> phone : Reassemble; check sequence; verify tag; decrypt
+note right of phone #DCFCE7
+  <b>DECRYPTED & VERIFIED</b>
+  Hello, world!
+  React Native displays Rust-verified plaintext.
+end note
+note over pi, phone
+ATT confirmation proves transport, not application decryption.
+No application ACK or retry; Pi reports delivery=unconfirmed.
+Protocol overview; physical Pixel proof remains pending.
+end note
+@enduml

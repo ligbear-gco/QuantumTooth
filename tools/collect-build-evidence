@@ -186,8 +186,14 @@ def main():
         f"{entry['sha256']}  {entry['path']}\n" for entry in records))
     (evidence / "boot-selection.env").write_text("".join(
         f"{key}={shlex.quote(str(value))}\n" for key, value in selection.items()))
-    source_paths = sorted(path for directory in ("kas", "layers/meta-qtooth-platform", "tools")
+    source_directories = ["kas", "layers/meta-qtooth-platform", "tools"]
+    if "qtooth-ble" in {line.split()[0] for line in manifest.read_text().splitlines() if line.strip()}:
+        source_directories += ["components/ble/src", "components/ble/core", "layers/meta-qtooth-ble/conf",
+                               "layers/meta-qtooth-ble/recipes-connectivity"]
+    source_paths = sorted(path for directory in source_directories
                           for path in (Path("/repo") / directory).rglob("*") if path.is_file())
+    if "components/ble/src" in source_directories:
+        source_paths += [Path("/repo/components/ble") / name for name in ("Cargo.toml", "Cargo.lock", "build.rs")]
     (evidence / "project-inputs.sha256").write_text("".join(
         f"{digest(path)}  {path}\n" for path in source_paths))
     print(json.dumps(records, indent=2))

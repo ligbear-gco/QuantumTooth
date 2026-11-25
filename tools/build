@@ -9,7 +9,7 @@ cd "$qtooth_root"
 source tools/build-selection
 qtooth_select "$@"
 if [[ ${#qtooth_args[@]} -gt 1 || (${#qtooth_args[@]} -eq 1 && "${qtooth_args[0]}" != --check) ]]; then
-    echo 'Usage: ./tools/build [--machine MACHINE] [--profile nonrt|rt] [--image base|diagnostic] [--check]' >&2
+    echo 'Usage: ./tools/build [--machine MACHINE] [--profile nonrt|rt] [--image base|diagnostic] [--feature none|ble] [--check]' >&2
     exit 2
 fi
 qtooth_evidence="$qtooth_build/evidence"
@@ -38,6 +38,13 @@ case "${qtooth_args[0]:-}" in
             bitbake -e qemu-system-native > evidence/qemu.env
             python3 /repo/tools/collect-build-evidence
         ' 2>&1 | tee "$qtooth_evidence/collect.log"
+        if [[ "$qtooth_feature" == ble ]]; then
+            ./tools/kas "${qtooth_selectors[@]}" shell "$qtooth_config" -c '
+                set -eu
+                bitbake -e qtooth-ble > evidence/qtooth-ble.env
+                python3 /repo/tools/collect-ble-evidence
+            ' 2>&1 | tee "$qtooth_evidence/collect-ble.log"
+        fi
         ;;
     *) echo 'Usage: ./tools/build [--check]' >&2; exit 2 ;;
 esac

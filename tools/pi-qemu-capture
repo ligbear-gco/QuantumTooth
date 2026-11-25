@@ -24,15 +24,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--profile', choices=('nonrt', 'rt'), required=True)
     parser.add_argument('--image', choices=('base', 'diagnostic'), default='base')
+    parser.add_argument('--feature', choices=('none', 'ble'), default='none')
     parser.add_argument('--tcg-thread', choices=('single', 'multi'), default='single')
     parser.add_argument('--script', type=Path, default=Path('tools/pi4-guest-inspect'))
     parser.add_argument('--condition', choices=('inspect', 'smoke', 'idle', 'load'), default='inspect')
     options = parser.parse_args()
     if options.image == 'base' and options.condition != 'inspect':
         parser.error('smoke/idle/load conditions require --image diagnostic')
+    if options.feature == 'ble' and options.image != 'diagnostic':
+        parser.error('BLE requires --image diagnostic')
     root = Path(__file__).resolve().parent.parent
     os.chdir(root)
-    evidence = root / f'build/raspberrypi4-64-{options.profile}-{options.image}/evidence'
+    feature_suffix = '-ble' if options.feature == 'ble' else ''
+    evidence = root / f'build/raspberrypi4-64-{options.profile}-{options.image}{feature_suffix}/evidence'
     config_hash = hashlib.sha256((evidence / 'kernel.config').read_bytes()).hexdigest()
     release = (evidence / 'kernel.release').read_text().strip()
     script = options.script.read_bytes()
@@ -53,6 +57,8 @@ def main():
     (trial / 'upload-commands.json').write_text(json.dumps(commands, indent=2)+'\n')
     args = ['./tools/run-qemu', '--machine', 'raspberrypi4-64', '--profile', options.profile,
             '--image', options.image, '--tcg-thread', options.tcg_thread]
+    if options.feature != 'none':
+        args += ['--feature', options.feature]
     (trial / 'launch-command.json').write_text(json.dumps(args)+'\n')
     master, slave = pty.openpty()
     started = time.monotonic()

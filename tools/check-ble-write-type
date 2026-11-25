@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""@file
+@brief Compile the patched BlueZ mapping with its own ATT constants, without a radio.
+"""
+
+import argparse
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+
+
+def main():
+    """@brief Extract the built source's helper and check all 256 opcode mappings.
+    @return None; missing helpers, compilation errors or assertions fail the check.
+    """
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("source", type=Path, help="Patched BlueZ source directory")
+    args = parser.parse_args()
+    source = args.source.resolve()
+    text = (source / "src/gatt-database.c").read_text()
+    helper = re.search(r"static const char \*att_write_type\(uint8_t opcode\)\n\{.*?\n\}",
+                       text, re.S)
+    if helper is None:
+        raise ValueError("BlueZ source lacks the characteristic write-type patch")
+    program = '''/** @file
+ * @brief Check the actual patched helper against pinned ATT constants.
+ */
+#include <assert.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+#include "src/shared/att-types.h"
+''' + helper[0] + '''
+/** @brief Only ordinary Requests map to request; unknown values stay absent. */
+int main(void)
+{
+    for (unsigned int opcode = 0; opcode <= UINT8_MAX; opcode++) {
+        const char *expected = NULL;
+        switch (opcode) {
+        case BT_ATT_OP_WRITE_REQ: expected = "request"; break;
+        case BT_ATT_OP_WRITE_CMD:
+        case BT_ATT_OP_SIGNED_WRITE_CMD: expected = "command"; break;
+        case BT_ATT_OP_PREP_WRITE_REQ:
+        case BT_ATT_OP_EXEC_WRITE_REQ: expected = "reliable"; break;
+        }
+        const char *actual = att_write_type(opcode);
+        assert(expected ? actual && !strcmp(actual, expected) : !actual);
+    }
+    return 0;
+}
+'''
+    with tempfile.TemporaryDirectory(prefix="qtooth-write-type-") as scratch:
+        code = Path(scratch) / "mapping.c"
+        binary = Path(scratch) / "mapping"
+        code.write_text(program)
+        subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-I", str(source),
+                        str(code), "-o", str(binary)], check=True)
+        subprocess.run([str(binary)], check=True)
+    print("Patched BlueZ helper: all 256 ATT opcode mappings passed.")
+
+
+if __name__ == "__main__":
+    main()

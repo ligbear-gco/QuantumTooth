@@ -1,0 +1,43 @@
+# Installed dependencies and generated native/Android output.
+/node_modules/
+/native/target/
+/android/.gradle/
+/android/.kotlin/
+/android/**/build/
+/android/**/.cxx/
+/android/**/.externalNativeBuild/
+/android/app/src/main/jniLibs/
+/android/app/src/main/assets/index.android.bundle*
+/coverage/
+/dist/
+**/__pycache__/
+*.py[cod]
+*.o
+*.a
+*.so
+
+# Workstation/editor settings and diagnostic output.
+/android/**/local.properties
+/.idea/
+/.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+*.log
+*.hprof
+/android/**/captures/
+
+# Operator provisioning, environment overrides and signing credentials.
+.env
+.env.*
+!.env.example
+!.env.sample
+pair.bin
+key.properties
+keystore.properties
+*.keystore
+*.jks
+*.p12
+*.pfx
+*.apk
+*.aab

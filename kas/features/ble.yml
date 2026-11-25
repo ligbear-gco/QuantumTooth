@@ -1,0 +1,11 @@
+# @file
+# @brief Opt in to the BLE probe only in the separately selected diagnostic image.
+header:
+  version: 14
+repos:
+  qtooth:
+    layers:
+      layers/meta-qtooth-ble:
+local_conf_header:
+  qtooth-ble: |
+    IMAGE_INSTALL:append:pn-qtooth-image-diagnostic = " qtooth-ble"

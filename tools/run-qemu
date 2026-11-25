@@ -12,7 +12,7 @@ qtooth_tcg_thread=single
 if [[ ${#qtooth_args[@]} -eq 2 && "${qtooth_args[0]}" == --tcg-thread && "${qtooth_args[1]}" =~ ^(single|multi)$ && "$qtooth_machine" == raspberrypi4-64 ]]; then
     qtooth_tcg_thread=${qtooth_args[1]}
 elif [[ ${#qtooth_args[@]} -ne 0 ]]; then
-    echo 'Usage: ./tools/run-qemu [--machine MACHINE] [--profile nonrt|rt] [--image base|diagnostic] [--tcg-thread single|multi (Pi only)]' >&2
+    echo 'Usage: ./tools/run-qemu [--machine MACHINE] [--profile nonrt|rt] [--image base|diagnostic] [--feature none|ble] [--tcg-thread single|multi (Pi only)]' >&2
     exit 2
 fi
 if [[ "$qtooth_machine" == raspberrypi4-64 ]]; then

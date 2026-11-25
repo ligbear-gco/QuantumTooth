@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+## @file
+## @brief Verify feature isolation and all existing selector defaults without Docker.
+## @return Nonzero for a changed default, invalid acceptance or lost forwarded argument.
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+source tools/build-selection
+
+## @brief Assert the current selector result equals the expected path and Kas input.
+## @param 1 Expected build directory.
+## @param 2 Expected Kas configuration string.
+check_selection() {
+    [[ "$qtooth_build" == "$1" && "$qtooth_config" == "$2" ]]
+}
+
+qtooth_select
+check_selection build/qemuarm64-nonrt kas/machines/qemuarm64.yml
+for profile in nonrt rt; do
+    for image in base diagnostic; do
+        expected="kas/machines/raspberrypi4-64.yml"
+        [[ "$profile" != rt ]] || expected+=:kas/profiles/rt.yml
+        [[ "$image" != diagnostic ]] || expected+=:kas/images/diagnostic.yml
+        qtooth_select --machine raspberrypi4-64 --profile "$profile" --image "$image"
+        check_selection "build/raspberrypi4-64-$profile-$image" "$expected"
+        defaults=("${qtooth_selectors[@]}")
+        qtooth_select --machine raspberrypi4-64 --profile "$profile" --image "$image" --feature none
+        check_selection "build/raspberrypi4-64-$profile-$image" "$expected"
+        [[ "${qtooth_selectors[*]}" == "${defaults[*]}" ]]
+        if [[ "$image" == diagnostic ]]; then
+            qtooth_select --machine raspberrypi4-64 --profile "$profile" --image "$image" --feature ble shell config -c 'echo hello'
+            check_selection "build/raspberrypi4-64-$profile-diagnostic-ble" "$expected:kas/features/ble.yml"
+            [[ "${qtooth_args[*]}" == 'shell config -c echo hello' ]]
+            [[ "${qtooth_selectors[*]}" == *'--feature ble' ]]
+        elif qtooth_select --machine raspberrypi4-64 --profile "$profile" --image base --feature ble 2>/dev/null; then
+            echo 'Base BLE selection unexpectedly accepted.' >&2; exit 1
+        fi
+    done
+done
+if qtooth_select --feature ble 2>/dev/null || qtooth_select --feature unknown 2>/dev/null \
+    || qtooth_select --feature 2>/dev/null || qtooth_select --feature --check 2>/dev/null; then
+    echo 'Invalid feature selection unexpectedly accepted.' >&2; exit 1
+fi
+echo 'Default paths/configuration, BLE isolation and argument forwarding passed.'

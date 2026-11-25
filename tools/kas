@@ -23,6 +23,10 @@ for qtooth_dir in upstream "$qtooth_build" cache/downloads cache/sstate cache/ha
     mkdir -p "$qtooth_dir"
     [[ -w "$qtooth_dir" ]] || { echo "Not writable: $qtooth_dir" >&2; exit 1; }
 done
+# @brief Provisioned build products and shared state may contain extractable embedded pair keys.
+if [[ "$qtooth_feature" == ble && -f local/ble/pair.bin ]]; then
+    chmod 700 "$qtooth_build" cache/sstate
+fi
 export KAS_CONTAINER_ENGINE=docker KAS_CONTAINER_IMAGE="$QTOOTH_KAS_IMAGE"
 export KAS_WORK_DIR="$qtooth_root/upstream" KAS_BUILD_DIR="$qtooth_root/$qtooth_build"
 export DL_DIR="$qtooth_root/cache/downloads" SSTATE_DIR="$qtooth_root/cache/sstate"

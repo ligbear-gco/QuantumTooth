@@ -12,8 +12,9 @@ The objective is to understand and recreate the system manually. The repository'
 
 **Completion boundary:** physical G1 is accepted under the operator's explicit
 supply-current assumption, disclosed in the [final physical lab](#final-physical-lab).
-Four physical image variants and twelve scheduling trials are verified. G2..5
-BLE/PQC applications and FPGA/electrical/recovery validation remain future work.
+Four physical image variants and twelve scheduling trials are verified.
+The [G2 PQC-over-BLE demonstration](G2_Architecture_and_Practical_Guide.md) is now
+complete; G3 FPGA feasibility is next, followed by G4/G5 physical recovery validation.
 Chapters 1–17 preserve the earlier teaching snapshot and its historical QEMU
 results; their code inventories/package counts are not the current release bill
 of materials. Lab 17 is the current deployment and G1 verification procedure.
@@ -446,7 +447,7 @@ The actual Pi boot path uses the WIC image and Raspberry Pi firmware. The QEMU p
 
 The archived bootstrap established generic ARM64 non-RT build/boot/runtime attribution. The archived Pi change established four Pi build selections, copied-artifact emulation, matching configuration/module checks and bounded emulation measurements. Main specs now contain the synchronized requirements; both implementation task lists are completed.
 
-**Physical G1 is now accepted under the disclosed current assumption.** The final lab records real-board boot, controller activation and BASE-3 measurements. G2 BLE applications, G3 FPGA/kernel API qualification, G4 electrical capture/fault trials and G5 model/guard/timing evidence remain future work. The guide documents their architectural boundary so that the platform choices make sense; it does not supply nonexistent implementations.
+**Physical G1 is accepted under the disclosed current assumption.** The final lab records real-board boot, controller activation and BASE-3 measurements. G2's PQC-over-BLE demonstration is also complete; G3 FPGA/kernel API qualification is next, followed by G4 electrical capture/fault trials and G5 model/guard/timing evidence. This guide documents their architectural boundary; G2 results are in its own course.
 
 <a id="kas"></a>
 ## 5. Kas, repository locking and BitBake configuration
@@ -2729,8 +2730,9 @@ is treated as measured and within the seller-certified board supply range.
 No numeric reading or instrument trace was supplied; no current value is invented
 and no frozen authority is rewritten. Board/boot/configuration, required software,
 controller binding, four baseline records and the repeated scheduling cohort are
-supported by the retained physical evidence. BLE peer/PQC behavior remains G2;
-FPGA fit, electrical harness and recovery timing remain G3..5.
+supported by the retained physical evidence. BLE peer/PQC results are documented
+in the completed G2 course; FPGA fit, electrical harness and recovery timing
+remain G3..5.
 
 For continued development, flash a frozen **ordinary** RT base or diagnostic WIC
 using §18.3–18.4; verify its identity again. Use diagnostic if a shell is needed.
@@ -2743,7 +2745,8 @@ records acceptance; [the physical specification](../../openspec/specs/platform-p
 records the requirements. Keep unredacted captures, operator addresses, host-key
 fingerprints and provisioning inputs private. Optional explain-back: why do an
 image SHA, a host-key fingerprint and a latency maximum establish three different
-facts? Next experiment: establish a controlled BLE peer connection for G2.
+facts? Continue with the [completed G2 course](G2_Architecture_and_Practical_Guide.md)
+for BLE/PQC; the next project milestone is G3 FPGA/kernel feasibility.
 
 Procedure references: [Raspberry Pi setup and Imager](https://www.raspberrypi.com/documentation/computers/getting-started.html),
 [OpenSSH key creation and fingerprints](https://man.openbsd.org/ssh-keygen),

@@ -1,12 +1,12 @@
 # QuantumTooth design
 
-Architecture SoT, baseline 2026-11-08. Frozen for future feature work; revisions require explicit user authorization. [HARDWARE.md](HARDWARE.md) owns physical facts and wiring. Specs derive behavior from these documents; unresolved gates are not permission to invent requirements.
+Architecture SoT, baseline 2026-11-08; phone UI stack and G2 acceptance boundary revised 2026-11-25 by explicit user decision. Frozen for future feature work; revisions require explicit user authorization. [HARDWARE.md](HARDWARE.md) owns physical facts and wiring. Specs derive behavior from these documents; unresolved gates are not permission to invent requirements.
 
 ## SCOPE — boundaries and language
 
 One headless Yocto Linux RT image hosts two independent shell-driven demonstrations: **qtooth-ble** and **qtooth-hwe2dr** (HardWare Enhanced Error Detection and Recovery). Neither depends on or forwards data through the other. Shell entry points are userspace applications; kernel drivers handle configuration and event delivery. The FPGA owns qtooth-hwe2dr device reset; its IRQ only notifies Linux.
 
-Rust owns CLIs, protocol/state machines, Android native core, training/export/reference tools and target firmware. Train through tch/LibTorch on the workstation. Use Rust in the kernel wherever the pinned tree exposes the required APIs; permit small C glue for missing SPI/GPIO/IRQ bindings. Minimal Kotlin adapts Android UI/BLE; Verilog/SystemVerilog describes FPGA hardware. No soft CPU or software VAE runtime on the FPGA.
+Rust owns CLIs, protocol/state machines, Android native core, training/export/reference tools and target firmware. Train through tch/LibTorch on the workstation. Use Rust in the kernel wherever the pinned tree exposes the required APIs; permit small C glue for missing SPI/GPIO/IRQ bindings. TypeScript with React Native owns the phone UI; minimal Kotlin adapts Android BLE and bridges to Rust through JNI. Verilog/SystemVerilog describes FPGA hardware. No soft CPU or software VAE runtime on the FPGA.
 
 ## BASE — lightweight Yocto RT platform
 
@@ -36,7 +36,7 @@ Entry point:
 |---|---|
 | Pi application | Rust, Cargo, clap, Tokio, BlueR/bluer GATT server over BlueZ D-Bus |
 | Shared protocol/crypto | Rust library; OpenSSL EVP ML-KEM-768, HKDF-SHA-256, AES-256-GCM; openssl bindings plus a narrow reviewed FFI wrapper if KEM APIs are absent |
-| Phone | Minimal Kotlin Android UI/BLE adapter; shared Rust core through JNI; NDK-built OpenSSL >=3.5, independent of Android's system crypto |
+| Phone | TypeScript / React Native UI; minimal Kotlin Android BLE/native module; shared Rust core through JNI; NDK-built OpenSSL >=3.5, independent of Android's system crypto |
 | Packaging | meta-qtooth-ble Cargo recipe, system libcrypto linkage on Pi; no vendored duplicate OpenSSL in the image |
 
 **BLE-1:** The command advertises a custom service and waits with a timeout. The foreground phone app scans, connects and subscribes; no background-discovery guarantee. Pi is peripheral/GATT server; phone is central/client. Use writes with response toward Pi and indications toward phone initially.
@@ -47,7 +47,7 @@ Entry point:
 
 **BLE-4:** Derive session-specific directional keys/nonce material with HKDF. Encrypt application data with AEAD; authenticate message metadata, enforce unique nonces and sequence-based replay rejection. Deliver plaintext only after tag verification. Reconnect establishes fresh state; never log PSKs, private keys or shared secrets.
 
-**BLE-5:** Prove phone decryption, fragment/reassembly behavior at small and larger MTUs, handshake cost, tamper/wrong-peer rejection and reconnect cleanup. Report sizes/counts/timings without secret material.
+**BLE-5:** G2 acceptance is the physical Pi/Pixel demonstration of authenticated ML-KEM-768 key establishment over BLE, encrypted application transfer and tag-verified phone plaintext, supported by reviewed capture/screen evidence and reported sizes/counts/timings without secret material. Native checks substantiate small/larger-MTU framing, tamper/wrong-peer rejection and session cleanup. Additional physical robustness checks remain documented follow-up work; they do not block G2 closure or progression to G3. Unperformed checks must remain explicitly labelled.
 
 ![BLE discovery, fragmented key establishment and encrypted data](../docs/diagrams/ble.svg)
 
@@ -96,10 +96,12 @@ Use recognizable trace events and matched fault trials for precursor/lead-time m
 ## GATES — implementation order and evidence
 
 1. **G1:** Pin/build/boot the minimal BSP-compatible RT image; establish baseline measurements.
-2. **G2:** Complete qtooth-ble and Pixel decryption before the FPGA feature.
-3. **G3:** Verify board revision/pinout, synthesize representative inference, and confirm capture/model fit, timing and Rust kernel API availability. No assumed hls4ml iCE40 backend.
+2. **G2 — complete:** The physical PQC-over-BLE demonstration establishes authenticated keys, transfers encrypted messages and shows verified Pixel plaintext, including retained-session reuse. Accepted 2026-11-25 under the user-authorized BLE-5 demonstration boundary.
+3. **G3 — next:** Verify board revision/pinout, synthesize representative inference, and confirm capture/model fit, timing and Rust kernel API availability. No assumed hls4ml iCE40 backend.
 4. **G4:** Validate capture with a logic analyzer; implement repeatable degradation and abrupt-fault trials with healthy-device traffic. Confirm controller/target clock-stretch compatibility before using it as a precursor.
 5. **G5:** Establish model evidence, fixed-point/RTL agreement, FPGA guard/pulse/disarm behavior and HWE-7 timing measurements. Delay IRQ servicing/SPI acknowledgment and exercise FIFO overflow to verify reset timing remains independent; measure notification latency and healthy-device disruption separately. Numeric deadlines/thresholds follow measurements; observed maxima are not proven worst-case bounds.
+
+G2 evidence and limitations are retained in the [course results](../docs/courses/G2_Architecture_and_Practical_Guide.md#9-recorded-physical-and-software-results), [demonstration GIF](../docs/experiments/pqc-over-ble-evidence-vid.gif) and [annotated capture](../docs/experiments/pqc-over-ble-cap.txt). The recorded standalone Pi error and unperformed physical robustness checks remain follow-up items, without reopening the completed demonstration milestone. G3 is the next milestone; its hardware/fit/timing checks have not yet been established.
 
 ## References
 

@@ -30,3 +30,9 @@ rustc-ice-*.txt
 
 # Operator-specific provisioning inputs; never commit keys or credentials.
 /local/
+
+# Private application packages and signing material, wherever generated.
+*.keystore
+*.jks
+*.apk
+*.aab

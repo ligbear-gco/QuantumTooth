@@ -1,0 +1,10 @@
+<!-- @file @brief Dark system bars; safe-area insets are handled by the screen. -->
+<resources>
+    <style name="AppTheme" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:colorAccent">#4DE3EE</item>
+        <item name="android:windowBackground">#080E13</item>
+    </style>
+</resources>

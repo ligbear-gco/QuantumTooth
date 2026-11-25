@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""@file
+@brief Attribute the BLE package and ARM64 system linkage to a completed image.
+@details Run inside the selected kas shell after the ordinary evidence collector.
+"""
+
+import hashlib
+import json
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+
+
+def bluez_attribution(evidence, rootfs):
+    """@brief Verify patched BlueZ metadata and package-owned daemon bytes.
+    @param evidence Selected build's metadata directory.
+    @param rootfs Completed diagnostic image filesystem.
+    @return Sanitized daemon, package and patch attribution.
+    """
+    recipe = evidence / "bluez5.env"
+    patch_name = "0001-gatt-preserve-characteristic-write-type.patch"
+    if f"file://{patch_name}" not in metadata(recipe, "SRC_URI").split():
+        raise ValueError("BLE build is missing its BlueZ write-type patch")
+    revision = metadata(recipe, "PR")
+    if not revision.endswith(".qtoothble1"):
+        raise ValueError("BLE build is missing its BlueZ package revision")
+    relative = "usr/libexec/bluetooth/bluetoothd"
+    installed = rootfs / relative
+    # Read the emitted package, which also works after sstate restoration removes S.
+    filename = (f"bluez5_{metadata(recipe, 'PV')}-{revision}_"
+                f"{metadata(recipe, 'PACKAGE_ARCH')}.ipk")
+    candidates = list(Path(metadata(recipe, "DEPLOY_DIR_IPK")).glob(f"*/{filename}"))
+    if len(candidates) != 1:
+        raise ValueError("Expected one exact patched BlueZ IPK")
+    package = candidates[0]
+    members = subprocess.check_output(["ar", "t", str(package)], text=True).splitlines()
+    data = [name for name in members if name.startswith("data.tar.")]
+    if len(data) != 1:
+        raise ValueError("Invalid BlueZ IPK data archive")
+    with tempfile.TemporaryDirectory() as scratch:
+        archive = Path(scratch) / data[0]
+        archive.write_bytes(subprocess.check_output(["ar", "p", str(package), data[0]]))
+        binary = subprocess.check_output(["tar", "-xOf", str(archive), f"./{relative}"])
+    if hashlib.sha256(binary).hexdigest() != digest(installed):
+        raise ValueError("Installed bluetoothd differs from patched BlueZ IPK")
+    patch = Path("/repo/layers/meta-qtooth-ble/recipes-connectivity/bluez5/files") / patch_name
+    return {"package": "bluez5", "version": metadata(recipe, "PV"),
+            "revision": revision, "installed_path": relative,
+            "binary_sha256": digest(installed), "ipk_sha256": digest(package),
+            "patch": patch_name, "patch_sha256": digest(patch)}
+
+
+def crypto_attribution(evidence, rootfs):
+    """@brief Attribute system libcrypto bytes to the selected OE provider and exact IPK.
+    @param evidence Private expanded BitBake metadata.
+    @param rootfs Completed image root filesystem.
+    @return Safe version/package/library hashes without provisioning inputs.
+    """
+    recipe = evidence / "openssl.env"
+    version = metadata(recipe, "PV")
+    if tuple(int(x) for x in version.split(".")[:2]) < (3, 5):
+        raise ValueError("OpenSSL >=3.5 is required")
+    relative = "usr/lib/libcrypto.so.3"
+    filename = (f"libcrypto3_{version}-{metadata(recipe, 'PR')}_"
+                f"{metadata(recipe, 'PACKAGE_ARCH')}.ipk")
+    candidates = list(Path(metadata(recipe, "DEPLOY_DIR_IPK")).glob(f"*/{filename}"))
+    if len(candidates) != 1:
+        raise ValueError("Expected one exact system libcrypto IPK")
+    package = candidates[0]
+    members = subprocess.check_output(["ar", "t", str(package)], text=True).splitlines()
+    data = [name for name in members if name.startswith("data.tar.")]
+    if len(data) != 1:
+        raise ValueError("Invalid libcrypto IPK archive")
+    with tempfile.TemporaryDirectory() as scratch:
+        archive = Path(scratch) / data[0]
+        archive.write_bytes(subprocess.check_output(["ar", "p", str(package), data[0]]))
+        binary = subprocess.check_output(["tar", "-xOf", str(archive), f"./{relative}"])
+    if hashlib.sha256(binary).hexdigest() != digest(rootfs / relative):
+        raise ValueError("Installed libcrypto differs from provider package")
+    return {"provider": metadata(recipe, "PN"), "version": version,
+            "package": "libcrypto3", "installed_path": relative,
+            "binary_sha256": digest(rootfs / relative), "ipk_sha256": digest(package)}
+
+
+def metadata(path, name):
+    """@brief Read one expanded BitBake scalar, failing when absent.
+    @param path Private BitBake environment dump.
+    @param name Exact metadata variable.
+    @return Expanded value.
+    """
+    match = re.search(r'^' + re.escape(name) + r'="(.*)"$', path.read_text(), re.M)
+    if match is None:
+        raise ValueError(f"Missing {name} in {path}")
+    return match.group(1)
+
+
+def digest(path):
+    """@brief Hash a source or artifact without interpreting its contents.
+    @param path Existing local file.
+    @return SHA-256 digest.
+    """
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def main():
+    """@brief Verify package ownership, binary identity and system D-Bus linkage.
+    @return None; failed attribution raises an error and fails tools/build.
+    """
+    evidence = Path("evidence")
+    recipe = evidence / "qtooth-ble.env"
+    image = evidence / "image.env"
+    rootfs = Path(metadata(image, "IMAGE_ROOTFS"))
+    installed = rootfs / "usr/bin/qtooth-ble"
+    packaged = Path(metadata(recipe, "PKGDEST")) / "qtooth-ble/usr/bin/qtooth-ble"
+    if digest(installed) != digest(packaged):
+        raise ValueError("Installed BLE executable differs from its recipe-owned package")
+    with installed.open("rb") as stream:
+        header = stream.read(20)
+    if header[:6] != b"\x7fELF\x02\x01" or int.from_bytes(header[18:20], "little") != 183:
+        raise ValueError("BLE executable is not little-endian ELF64 AArch64")
+    elf = subprocess.check_output(["readelf", "-h", "-d", str(installed)], text=True)
+    (evidence / "ble-elf.txt").write_text(elf)
+    needed = re.findall(r'\(NEEDED\).*\[([^]]+)\]', elf)
+    if "libdbus-1.so.3" not in needed:
+        raise ValueError("BLE executable is not dynamically linked to system D-Bus")
+    if "libcrypto.so.3" not in needed:
+        raise ValueError("Missing system OpenSSL libcrypto linkage")
+    packages = {line.split()[0] for line in (evidence / "image.manifest").read_text().splitlines() if line.strip()}
+    # The pinned dbus recipe sets DEBIANNAME:${PN} = "dbus-1"; its library is
+    # renamed by Debian-style shared-library packaging, not embedded in our crate.
+    if not {"qtooth-ble", "bluez5", "dbus-1", "libdbus-1-3", "libcrypto3"} <= packages:
+        raise ValueError("BLE/BlueZ/D-Bus image packages missing")
+    if any(re.match(r'^(?:rust|rustc|cargo|gcc|g\+\+)(?:-|$)', name) for name in packages):
+        raise ValueError("Unexpected target compiler package")
+    source = Path(metadata(recipe, "S"))
+    source_files = [source / "Cargo.toml", source / "Cargo.lock", source / "build.rs", source / "core/Cargo.toml", source / "LICENSE",
+                    *sorted((source / "core/src").rglob("*.rs")),
+                    *sorted((source / "src").rglob("*.rs"))]
+    sources = {str(path.relative_to(source)): digest(path) for path in source_files}
+    repo = Path("/repo/components/ble")
+    for name, value in sources.items():
+        original = Path("/repo/LICENSE") if name == "LICENSE" else repo / name
+        if digest(original) != value:
+            raise ValueError(f"Recipe source differs from repository: {name}")
+    lock = (source / "Cargo.lock").read_text()
+    if 'name = "openssl-src"' in lock:
+        raise ValueError("Vendored OpenSSL source is forbidden")
+    for unit in (rootfs / "etc/systemd/system").rglob("*"):
+        if unit.is_file() and "qtooth-ble" in unit.read_text(errors="replace"):
+            raise ValueError("Unexpected boot-enabled BLE worker")
+    flags = metadata(recipe, "CARGO_BUILD_FLAGS")
+    if "--frozen" not in flags:
+        raise ValueError("Recipe compilation must be frozen/offline after fetch")
+    report = {"package": "qtooth-ble", "version": metadata(recipe, "PV"),
+              "installed_path": "usr/bin/qtooth-ble", "binary_sha256": digest(installed),
+              "machine": "AArch64", "needed": needed, "cargo_build_flags": flags,
+              "bluez": bluez_attribution(evidence, rootfs),
+              "crypto": crypto_attribution(evidence, rootfs),
+              "provisioned": metadata(recipe, "QTOOTH_PAIR_PRESENT") == "1",
+              "sources": sources, "image_manifest_sha256": digest(evidence / "image.manifest"),
+              "transport_packages": sorted(name for name in packages if name.startswith(
+                  ("qtooth-ble", "bluez5", "dbus", "libdbus", "libcrypto", "openssl")))}
+    (evidence / "ble-attribution.json").write_text(json.dumps(report, indent=2) + "\n")
+    print("BLE/BlueZ/system libcrypto package identity, write-type patch, shared sources and ARM64 linkage verified.")
+
+
+if __name__ == "__main__":
+    main()

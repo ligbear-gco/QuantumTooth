@@ -1,0 +1,31 @@
+Annotated BLE capture excerpt (public summary)
+Peer addresses are replaced by PI/PHONE; host/controller label the HCI boundary.
+Times are relative capture seconds. Length is the supplied capture-frame length,
+not logical object size or ATT value size. Multi-packet objects are summarized;
+raw private evidence is not included. This is not an over-the-air RF trace.
+
+1. BLE setup and authenticated ML-KEM-768 key establishment
+No.	Time	Source	Destination	Protocol	Length	Info
+19	50.569159	controller	host	HCI_EVT	21	LE Connection Complete
+28	50.598643	PI	PHONE	ATT	11	Exchange MTU Request: 517
+34	50.714235	PHONE	PI	ATT	11	Exchange MTU Response: 517
+125	51.538440	PI	PHONE	ATT	52	RX/TX characteristic discovery
+135	51.658168	PHONE	PI	ATT	13	Enable TX indications
+136	51.658644	PI	PHONE	ATT	9	Subscription acknowledged
+137	51.719098	PHONE	PI	ATT	87	ClientHello — start authenticated handshake
+141	51.737801	PI	PHONE	ATT	21	PiOffer 1/3 — ML-KEM public key + authentication
+147	51.765259	PI	PHONE	ATT	21	PiOffer 2/3
+152	51.795037	PI	PHONE	ATT	9	PiOffer 3/3 — 1249-byte object complete
+158	51.891177	PHONE	PI	ATT	21	PeerFinish 1/3 — KEM ciphertext + authentication/confirmation
+162	51.951170	PHONE	PI	ATT	21	PeerFinish 2/3
+164	52.007716	PHONE	PI	ATT	163	PeerFinish 3/3 — 1152-byte object complete
+167	52.012336	PI	PHONE	ATT	51	PiFinish — final key confirmation
+168	52.065823	PHONE	PI	ATT	9	PiFinish ATT confirmation
+
+2. AES-256-GCM encrypted message transfer
+170	52.067793	PI	PHONE	ATT	77	58-byte record: metadata 29 + ciphertext 13 + authentication tag 16
+171	52.125669	PHONE	PI	ATT	9	ATT confirmation — transport acknowledged
+
+3. BLE connection closure
+178	54.183502	host	controller	HCI_CMD	6	Disconnect
+180	54.226662	controller	host	HCI_EVT	6	Disconnect Complete

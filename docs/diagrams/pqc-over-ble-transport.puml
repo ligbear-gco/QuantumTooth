@@ -1,0 +1,29 @@
+@startuml
+title BLE transport (before application authentication)
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontName DejaVu Sans
+skinparam shadowing false
+hide footbox
+participant "Pi Rust app\nBlueR" as app
+participant "Pi BlueZ\nLinux Bluetooth stack" as stack
+participant "Foreground phone\nGATT client / central" as phone
+app -> stack : D-Bus: register custom GATT service\nand advertise as peripheral
+stack -> phone : Advertising (service UUID)
+phone -> stack : Connect; exchange ATT MTU
+phone -> stack : Discover service and characteristics
+phone -> stack : Write CCCD: enable indications
+stack -> app : Subscription ready
+phone -> stack : ATT write request: chunk toward Pi
+stack -> app : Write callback; validate/enqueue chunk
+app --> stack : Write result
+stack --> phone : ATT write response
+app -> stack : Indicate chunk toward phone
+stack -> phone : ATT indication
+phone --> stack : ATT confirmation
+note over app, phone
+Each write/indication carries a bounded chunk.
+ATT confirmation is transport-level only.
+Application records have no receipt or retry.
+Transport completion leaves delivery unconfirmed.
+end note
+@enduml
